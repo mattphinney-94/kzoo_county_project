@@ -116,15 +116,17 @@ class EntityResolver:
     # Public Interface
     ############################################################
 
+    # Runs the complete entity resolution pipeline.
     def build(self, clean_df):
-        """
-        Runs the complete entity resolution pipeline.
-        """
 
         entity_occurrences = self._create_entity_occurrences(clean_df)
 
+        # Create the entities table, and update the occurrences to associate each occurrence id with an entity id.
+        entity_occurrences, entities = self._create_entities(
+            entity_occurrences
+        )
+
         # Placeholder tables
-        entities = pd.DataFrame()
         parcel_entity_roles = pd.DataFrame()
         association_evidence = pd.DataFrame()
         entity_associations = pd.DataFrame()
@@ -293,8 +295,119 @@ class EntityResolver:
     # Stage 2 - Canonical Entities
     ############################################################
 
+    ############################################################
+    # Stage 2 - Canonical Entities
+    ############################################################
+
+    # Creates the entities table.
     def _create_entities(self, entity_occurrences):
-        raise NotImplementedError
+
+        """
+        An entity is currently defined as a unique combination of
+
+            entity_name
+            entity_type
+            associated_address
+
+        This intentionally avoids merging people with identical
+        names but different addresses.
+        """
+
+        # Build one row per unique entity
+        entities = (
+
+            entity_occurrences
+
+            .groupby(
+                [
+                    "entity_name",
+                    "entity_type",
+                    "associated_address"
+                ],
+                dropna=False,
+                as_index=False
+            )
+
+            .agg(
+
+                organization_type=(
+                    "organization_type",
+                    "first"
+                ),
+
+                classification_confidence=(
+                    "classification_confidence",
+                    "first"
+                ),
+
+                occurrence_count=(
+                    "occurrence_id",
+                    "count"
+                )
+
+            )
+
+        )
+
+        # Rename columns
+        entities = entities.rename(
+            columns={
+                "entity_name": "canonical_name",
+                "associated_address": "canonical_address"
+            }
+        )
+
+        # Assign entity IDs
+        entities.insert(
+            0,
+            "entity_id",
+            range(1, len(entities) + 1)
+        )
+
+        # Sort for readability
+        entities = entities.sort_values(
+            [
+                "entity_type",
+                "canonical_name",
+                "canonical_address"
+            ]
+        ).reset_index(drop=True)
+
+        # Reassign IDs after sorting
+        entities["entity_id"] = range(
+            1,
+            len(entities) + 1
+        )
+
+        # Update the entity occurrences table to associate each occurrence with an entity id.
+        entity_occurrences = entity_occurrences.merge(
+
+            entities[
+                [
+                    "entity_id",
+                    "canonical_name",
+                    "entity_type",
+                    "canonical_address"
+                ]
+            ],
+
+            left_on=[
+                "entity_name",
+                "entity_type",
+                "associated_address"
+            ],
+
+            right_on=[
+                "canonical_name",
+                "entity_type",
+                "canonical_address"
+            ],
+
+            how="left"
+
+        )
+
+        return entity_occurrences, entities
 
     ############################################################
     # Stage 3 - Parcel Entity Roles

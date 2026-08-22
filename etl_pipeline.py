@@ -32,6 +32,7 @@ clean_df = cleaner.clean_data(extracted_df)
     entity_associations
 ) = EntityResolver().build(clean_df)
 
+### Entity occurrences table check
 print(entity_occurrences.head(20))
 print()
 
@@ -42,3 +43,9 @@ print(entity_occurrences["entity_type"].value_counts())
 
 print("\nOrganization types:")
 print(entity_occurrences["organization_type"].value_counts(dropna=False))
+
+### Entities table check
+print(entities.head(20))
+print()
+
+print(f"Total entities: {len(entities):,}")
