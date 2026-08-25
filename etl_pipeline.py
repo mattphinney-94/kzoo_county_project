@@ -48,7 +48,7 @@ def main():
         clean_df
     )
 
-
+    """
     # ----------------------------------------------------------
     # Entity Occurrences Checks
     # ----------------------------------------------------------
@@ -233,14 +233,78 @@ def main():
 
     print(unknown_joint_names[
         "entity_name"
-    ].value_counts().head(50))
+    ].value_counts())
 
     unknown_entity_columns = entities.loc[
         entities["entity_type"] == "Unknown"
     ]
 
     print(unknown_entity_columns.head(500))
+    """
 
+    source_occurrence_count = (
+        entity_occurrences[
+            "source_occurrence_id"
+        ]
+        .nunique()
+    )
+
+    expanded_occurrence_count = len(
+        entity_occurrences
+    )
+
+    derived_occurrence_increase = (
+        expanded_occurrence_count
+        - source_occurrence_count
+    )
+
+    print(
+        "Unique source occurrences:",
+        f"{source_occurrence_count:,}"
+    )
+
+    print(
+        "Entity occurrences after Joint expansion:",
+        f"{expanded_occurrence_count:,}"
+    )
+
+    print(
+        "Additional occurrences created by decomposition:",
+        f"{derived_occurrence_increase:,}"
+    )
+
+    print(
+        "Expanded Joint-derived occurrences:",
+        entity_occurrences[
+            "joint_expanded"
+        ].sum()
+    )
+
+    medium_joint_candidates = (
+        entity_occurrences[
+            (entity_occurrences["entity_type"] == "Joint")
+            &
+            (
+                    entity_occurrences[
+                        "joint_parse_confidence"
+                    ] == "Medium"
+            )
+            ]
+    )
+
+    print(
+        "Medium-confidence Joint candidates "
+        "not yet expanded:",
+        len(medium_joint_candidates)
+    )
+
+    medium_joint_candidates[
+        [
+            "entity_name",
+            "joint_parse_rule",
+            "joint_parse_confidence"
+        ]
+    ].drop_duplicates().head(100)
 
 if __name__ == "__main__":
     main()

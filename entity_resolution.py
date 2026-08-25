@@ -103,16 +103,6 @@ class EntityResolver:
             r"\bMORTGAGE\b": ("Financial Institution", "Medium"),
 
             # ----------------------------------------------------------
-            # Trusts and estates
-            # ----------------------------------------------------------
-
-            r"\bTRUST\b": ("Trust", "Medium"),
-            r"\bTRST\b": ("Trust", "Medium"),
-
-            r"\bESTATE\b": ("Estate", "Medium"),
-            r"\bESTATES\b": ("Estate", "Medium"),
-
-            # ----------------------------------------------------------
             # Religious organizations
             # ----------------------------------------------------------
 
@@ -204,7 +194,19 @@ class EntityResolver:
 
             r"\bNAVIGATORS\b": ("Other Organization", "Medium"),
 
-            r"\bREVITALIZATION\b": ("Other Organization", "Medium")
+            r"\bREVITALIZATION\b": ("Other Organization", "Medium"),
+
+            r"\bRESTAURANT\b": ("Other Organization", "Medium"),
+
+            # ----------------------------------------------------------
+            # Trusts and estates
+            # ----------------------------------------------------------
+
+            r"\bTRUST\b": ("Trust", "Medium"),
+            r"\bTRST\b": ("Trust", "Medium"),
+
+            r"\bESTATE\b": ("Estate", "Medium"),
+            r"\bESTATES\b": ("Estate", "Medium")
         }
 
         # This is used to classify specific troublesome entities that aren't
@@ -301,36 +303,57 @@ class EntityResolver:
     # Entity Occurrences
     ############################################################
 
+    # ----------------------------------------------------------
+    # Orchestration
+    # ----------------------------------------------------------
+
     def _create_entity_occurrences(self, clean_df):
 
-        entity_occurrences = self._extract_entity_occurrences(clean_df)
+        # Extract one row per non-empty source-cell occurrence.
+        entity_occurrences = self._extract_entity_occurrences(
+            clean_df
+        )
 
+        # Classify the original source occurrences.
         entity_occurrences = self._classify_entity_type(
             entity_occurrences
         )
 
+        # Replace safely parseable Joint occurrences with their
+        # derived individual Person occurrences.
+        entity_occurrences = self._expand_joint_occurrences(
+            entity_occurrences,
+            allowed_confidences=("High", "Medium")
+        )
+
+        # Assign organization subtype information to the final
+        # occurrence rows.
         entity_occurrences = self._classify_organizations(
             entity_occurrences
         )
 
+        # Add address provenance.
         entity_occurrences = self._assign_address_source(
             entity_occurrences
         )
 
+        # occurrence_id represents the post-decomposition occurrence
+        # table, so assign it last.
         entity_occurrences = self._assign_occurrence_ids(
             entity_occurrences
         )
 
         return entity_occurrences
 
-    ############################################################
+    # ----------------------------------------------------------
+    # Entity Occurrence Extraction and Source Lineage
+    # ----------------------------------------------------------
 
     def _extract_entity_occurrences(self, clean_df):
 
         tables = []
 
         for column, info in self.role_mapping.items():
-
             temp = clean_df[
                 [
                     "parcel_number",
@@ -347,6 +370,13 @@ class EntityResolver:
 
             temp["role"] = info["role"]
 
+            # Preserve the original source value even if entity_name
+            # is later transformed or decomposed.
+            temp["source_entity_name"] = temp["entity_name"]
+
+            # Preserve the source field as additional provenance.
+            temp["source_column"] = column
+
             tables.append(temp)
 
         entity_occurrences = pd.concat(
@@ -356,43 +386,44 @@ class EntityResolver:
 
         entity_occurrences = entity_occurrences[
             entity_occurrences["entity_name"] != ""
-        ].copy()
+            ].copy()
+
+        # Each row currently represents exactly one non-empty
+        # source-cell occurrence. Preserve that identity before any
+        # later decomposition creates additional rows.
+        entity_occurrences = entity_occurrences.reset_index(
+            drop=True
+        )
+
+        entity_occurrences["source_occurrence_id"] = (
+                entity_occurrences.index + 1
+        )
 
         return entity_occurrences
 
-    ############################################################
+    # ----------------------------------------------------------
+    # Entity Type Classification
+    # ----------------------------------------------------------
 
     def _classify_entity_type(self, entity_occurrences):
         """
-        Classify each entity occurrence as:
+        Classify entity occurrences as:
 
             Person
             Organization
+            Joint
             Unknown
 
-        Classification precedence:
-
-            1. Default to Unknown.
-            2. Organization patterns identify organizations.
-            3. Remaining names that can be safely parsed as individual
-               person names are classified as Person.
-            4. Explicit entity_type_overrides are applied last and take
-               precedence over all generalized rules.
-
-        Unknown is intentionally used when there is not enough evidence
-        to confidently classify a source value.
+        Explicit overrides take precedence over generalized rules.
         """
 
         entity_occurrences = entity_occurrences.copy()
 
-        # ----------------------------------------------------------
-        # Default classification
-        # ----------------------------------------------------------
-
+        # Default
         entity_occurrences["entity_type"] = "Unknown"
 
         # ----------------------------------------------------------
-        # Organization classification
+        # Organization
         # ----------------------------------------------------------
 
         organization_mask = (
@@ -411,30 +442,57 @@ class EntityResolver:
         ] = "Organization"
 
         # ----------------------------------------------------------
-        # Person classification
+        # Joint / multiple-party records
         # ----------------------------------------------------------
 
-        # Only inspect names that have not already been positively
-        # identified as organizations.
         unknown_mask = (
                 entity_occurrences["entity_type"]
                 == "Unknown"
         )
 
-        parsed_names = (
+        joint_mask = (
+                unknown_mask
+                &
+                entity_occurrences[
+                    "entity_name"
+                ].apply(
+                    self._looks_like_joint_name
+                )
+        )
+
+        entity_occurrences.loc[
+            joint_mask,
+            "entity_type"
+        ] = "Joint"
+
+        # ----------------------------------------------------------
+        # Person
+        # ----------------------------------------------------------
+
+        unknown_mask = (
+                entity_occurrences["entity_type"]
+                == "Unknown"
+        )
+
+        person_like = (
             entity_occurrences.loc[
                 unknown_mask,
                 "entity_name"
             ]
-            .apply(self._parse_person_name)
+            .apply(self._looks_like_person_name)
         )
 
         person_indexes = (
-            parsed_names[
-                parsed_names.notna()
+            person_like[
+                person_like
             ]
             .index
         )
+
+        entity_occurrences.loc[
+            person_indexes,
+            "entity_type"
+        ] = "Person"
 
         entity_occurrences.loc[
             person_indexes,
@@ -450,10 +508,10 @@ class EntityResolver:
             .map(self.entity_type_overrides)
         )
 
-        # Protect against a typo in the override dictionary.
         valid_entity_types = {
             "Person",
             "Organization",
+            "Joint",
             "Unknown"
         }
 
@@ -479,7 +537,849 @@ class EntityResolver:
 
         return entity_occurrences
 
-    ############################################################
+    def _normalize_entity_type_candidate(self, name):
+        """
+        Create a temporary representation of an entity name for
+        entity-type classification.
+
+        This method does not change the source entity_name or its role.
+        Routing prefixes and other annotations are removed only so that
+        the underlying name can be evaluated as Person, Organization,
+        Joint, or Unknown.
+        """
+
+        name = self._normalize_match_name(name)
+
+        if not name:
+            return ""
+
+        # ----------------------------------------------------------
+        # Routing prefixes
+        # ----------------------------------------------------------
+
+        # C/O JEREMY SHILTS
+        # C/O: JEREMY SHILTS
+        name = re.sub(
+            r"^C\s*/\s*O\s*:?\s*",
+            "",
+            name
+        )
+
+        # ATTN: TROY BUTLER
+        name = re.sub(
+            r"^ATTN\s*:?\s*",
+            "",
+            name
+        )
+
+        # % CHARLOTTE A JOSLIN
+        name = re.sub(
+            r"^%\s*",
+            "",
+            name
+        )
+
+        # ----------------------------------------------------------
+        # Known status annotations
+        # ----------------------------------------------------------
+
+        name = re.sub(
+            r"\s*\((?:LC|LE|DCSD)\)\s*$",
+            "",
+            name
+        )
+
+        # DECEASED
+        name = re.sub(
+            r"\s*\(?\bDECEASED\b\)?\s*$",
+            "",
+            name
+        )
+
+        # Trailing trustee designation
+        name = re.sub(
+            r",?\s*\b(?:TRUSTEE|TRSTEE)\b\s*$",
+            "",
+            name
+        )
+
+        # Ownership percentage annotation
+        name = re.sub(
+            r"\s+\d+(?:\.\d+)?\s*%\s*INT\s*$",
+            "",
+            name
+        )
+
+        # Trailing asterisk
+        name = re.sub(
+            r"\*+$",
+            "",
+            name
+        )
+
+        # ----------------------------------------------------------
+        # FKA wrapper
+        # ----------------------------------------------------------
+
+        fka_match = re.fullmatch(
+            r"\(\s*FKA\s+(.+?)\s*\)",
+            name
+        )
+
+        if fka_match:
+            name = fka_match.group(1)
+
+        return name.strip(" ,")
+
+    def _looks_like_person_name(self, name):
+        """
+        Determine whether a source value plausibly represents one individual.
+
+        This method is intentionally less strict than _parse_person_name().
+
+        It is used only for entity-type classification. It does NOT determine
+        first-name / last-name orientation and should not be used to merge
+        entities.
+        """
+
+        name = self._normalize_entity_type_candidate(name)
+
+        if not name:
+            return False
+
+        # ----------------------------------------------------------
+        # Reject obvious multi-party records
+        # ----------------------------------------------------------
+
+        if (
+                "&" in name
+                or "/" in name
+                or ";" in name
+                or re.search(
+            r"\b(?:AND|ET AL|ET UX)\b",
+            name
+        )
+        ):
+            return False
+
+        # ----------------------------------------------------------
+        # Reject remaining parenthetical structures
+        # ----------------------------------------------------------
+
+        if "(" in name or ")" in name:
+            return False
+
+        # ----------------------------------------------------------
+        # Clean punctuation used in otherwise normal person names
+        # ----------------------------------------------------------
+
+        candidate = name.replace(",", " ")
+
+        candidate = re.sub(
+            r"\s+",
+            " ",
+            candidate
+        ).strip()
+
+        tokens = candidate.split()
+
+        if not tokens:
+            return False
+
+        # ----------------------------------------------------------
+        # Remove a terminal generational suffix
+        # ----------------------------------------------------------
+
+        suffixes = {
+            "JR",
+            "JUNIOR",
+            "SR",
+            "SENIOR",
+            "II",
+            "III",
+            "IV"
+        }
+
+        if tokens[-1] in suffixes:
+            tokens = tokens[:-1]
+
+        if not tokens:
+            return False
+
+        # ----------------------------------------------------------
+        # Basic structural requirements
+        # ----------------------------------------------------------
+
+        # One token provides too little information.
+        #
+        # Examples:
+        #     RYAN
+        #     LATHAM
+        #     BENCHMARK
+        #
+        # These should remain Unknown unless explicitly overridden.
+        if len(tokens) < 2:
+            return False
+
+        # Very long strings are too structurally ambiguous for this
+        # simple classifier.
+        if len(tokens) > 6:
+            return False
+
+        # ----------------------------------------------------------
+        # Token validation
+        # ----------------------------------------------------------
+
+        for token in tokens:
+
+            # Allow letters, apostrophes, and hyphens in names.
+            if not re.fullmatch(
+                    r"[A-Z]+(?:['-][A-Z]+)*",
+                    token
+            ):
+                return False
+
+        # ----------------------------------------------------------
+        # Person-like structure
+        # ----------------------------------------------------------
+
+        return True
+
+    def _looks_like_joint_name(self, name):
+        """
+        Determine whether a source value appears to represent
+        multiple parties.
+
+        Routing prefixes and administrative annotations are ignored
+        for classification purposes only.
+        """
+
+        name = self._normalize_entity_type_candidate(name)
+
+        if not name:
+            return False
+
+        if "&" in name:
+            return True
+
+        if ";" in name:
+            return True
+
+        if re.search(
+                r"\bAND\b",
+                name
+        ):
+            return True
+
+        if "/" in name:
+            return True
+
+        return False
+
+    # ----------------------------------------------------------
+    # Joint Occurrence Decomposition
+    # ----------------------------------------------------------
+
+    def _parse_joint_name(self, name):
+        """
+        Attempt to decompose a Joint entity name into individual people.
+
+        Version 1 intentionally supports only relatively high-confidence
+        single-ampersand formats.
+
+        Supported families
+        ------------------
+
+        1. Explicit surnames for both people:
+
+            LAST1, FIRST1 [MIDDLE] & LAST2, FIRST2 [MIDDLE]
+
+            Example:
+                MASTERS, JANET & BROWN, CHRISTIE
+
+            Produces:
+                MASTERS, JANET
+                BROWN, CHRISTIE
+
+
+        2. One explicit shared surname:
+
+            LAST, FIRST1 [MIDDLE] & FIRST2 [MIDDLE]
+
+            Example:
+                ALEXANDER, MICHAEL & KELLY
+
+            Produces:
+                ALEXANDER, MICHAEL
+                ALEXANDER, KELLY
+
+
+        Ambiguous formats are intentionally left unresolved.
+
+        Returns
+        -------
+        dict or None
+
+        Successful result:
+
+            {
+                "parties": [...],
+                "rule": "...",
+                "confidence": "High" or "Medium"
+            }
+
+        None means the name should remain a Joint occurrence.
+        """
+
+        candidate = self._normalize_entity_type_candidate(name)
+
+        if not candidate:
+            return None
+
+        # ----------------------------------------------------------
+        # Version 1 supports exactly one ampersand
+        # ----------------------------------------------------------
+
+        if candidate.count("&") != 1:
+            return None
+
+        # Other multi-party separators make the structure too
+        # complicated for this version of the parser.
+        if ";" in candidate:
+            return None
+
+        if "/" in candidate:
+            return None
+
+        if re.search(
+                r"\b(?:AND|ET AL|ET UX)\b",
+                candidate
+        ):
+            return None
+
+        # ----------------------------------------------------------
+        # Split into the two apparent parties
+        # ----------------------------------------------------------
+
+        left, right = [
+            part.strip(" ,")
+            for part in candidate.split("&", 1)
+        ]
+
+        if not left or not right:
+            return None
+
+        # ----------------------------------------------------------
+        # Family 1:
+        #
+        # LAST1, FIRST1 ... & LAST2, FIRST2 ...
+        #
+        # Both surnames are explicit.
+        # ----------------------------------------------------------
+
+        if candidate.count(",") == 2:
+
+            # Require exactly one comma on each side.
+            #
+            # This prevents something such as:
+            #
+            # NUTT, JAMES D, II & SHANNON M
+            #
+            # from being mistaken for the explicit-surname format.
+            if (
+                    left.count(",") != 1
+                    or right.count(",") != 1
+            ):
+                return None
+
+            party_1 = left
+            party_2 = right
+
+            parsed_1 = self._parse_person_name(
+                party_1
+            )
+
+            parsed_2 = self._parse_person_name(
+                party_2
+            )
+
+            # Both resulting names must independently look like
+            # parseable individual people.
+            if (
+                    parsed_1 is None
+                    or parsed_2 is None
+            ):
+                return None
+
+            # If either person is represented only by a one-letter
+            # first name, keep the result available for inspection
+            # but do not treat it as the highest-confidence case.
+            if (
+                    len(parsed_1["first_name"]) == 1
+                    or len(parsed_2["first_name"]) == 1
+            ):
+                confidence = "Medium"
+
+            else:
+                confidence = "High"
+
+            return {
+                "parties": [
+                    party_1,
+                    party_2
+                ],
+                "rule": "explicit_surnames_comma",
+                "confidence": confidence
+            }
+
+        # ----------------------------------------------------------
+        # Family 2:
+        #
+        # LAST, FIRST1 ... & FIRST2 ...
+        #
+        # The surname before the comma appears to be shared.
+        # ----------------------------------------------------------
+
+        if candidate.count(",") == 1:
+
+            # The comma must be on the left side.
+            if (
+                    left.count(",") != 1
+                    or right.count(",") != 0
+            ):
+                return None
+
+            surname, first_party_given = [
+                part.strip()
+                for part in left.split(",", 1)
+            ]
+
+            if (
+                    not surname
+                    or not first_party_given
+            ):
+                return None
+
+            party_1 = (
+                f"{surname}, "
+                f"{first_party_given}"
+            )
+
+            parsed_1 = self._parse_person_name(
+                party_1
+            )
+
+            if parsed_1 is None:
+                return None
+
+            # ------------------------------------------------------
+            # Determine whether the right side is safe enough to
+            # interpret as another given-name sequence sharing the
+            # surname.
+            # ------------------------------------------------------
+
+            right_tokens = right.split()
+
+            if not right_tokens:
+                return None
+
+            suffixes = {
+                "JR",
+                "JUNIOR",
+                "SR",
+                "SENIOR",
+                "II",
+                "III",
+                "IV"
+            }
+
+            # ------------------------------------------------------
+            # High confidence:
+            #
+            # ALEXANDER, MICHAEL & KELLY
+            #
+            # A one-token second party is a strong shared-surname
+            # structure, provided the token is more than an initial.
+            # ------------------------------------------------------
+
+            if len(right_tokens) == 1:
+
+                if len(right_tokens[0]) == 1:
+                    return None
+
+                confidence = "High"
+
+
+            # ------------------------------------------------------
+            # High confidence:
+            #
+            # SMITH, JOHN & ROBERT JR
+            #
+            # The second token is clearly a suffix rather than a
+            # possible surname.
+            # ------------------------------------------------------
+
+            elif (
+                    len(right_tokens) == 2
+                    and right_tokens[1] in suffixes
+            ):
+
+                if len(right_tokens[0]) == 1:
+                    return None
+
+                confidence = "High"
+
+
+            # ------------------------------------------------------
+            # Medium confidence:
+            #
+            # DIPZINSKI, JOSHUA D & ELISABETH A
+            #
+            # This is likely FIRST + MIDDLE INITIAL.
+            #
+            # However:
+            #
+            # GREENMAN, PETER & NICHOLS-HICKS S
+            #
+            # could instead mean surname + first initial.
+            #
+            # Therefore retain this as a candidate but do not expand
+            # it automatically under the default High-only setting.
+            # ------------------------------------------------------
+
+            elif (
+                    len(right_tokens) == 2
+                    and len(right_tokens[1]) == 1
+                    and len(right_tokens[0]) > 1
+            ):
+
+                confidence = "Medium"
+
+
+            # ------------------------------------------------------
+            # Medium confidence:
+            #
+            # LAST, FIRST & SECOND M JR
+            # ------------------------------------------------------
+
+            elif (
+                    len(right_tokens) == 3
+                    and len(right_tokens[1]) == 1
+                    and right_tokens[2] in suffixes
+                    and len(right_tokens[0]) > 1
+            ):
+
+                confidence = "Medium"
+
+
+            # Everything else is too ambiguous for version 1.
+            #
+            # Example:
+            #
+            # KUHN, CHRISTOPHER L & LEE TAYLOR
+            #
+            # TAYLOR could be a middle name or a surname.
+            else:
+                return None
+
+            party_2 = (
+                f"{surname}, {right}"
+            )
+
+            parsed_2 = self._parse_person_name(
+                party_2
+            )
+
+            if parsed_2 is None:
+                return None
+
+            return {
+                "parties": [
+                    party_1,
+                    party_2
+                ],
+                "rule": "shared_surname_comma",
+                "confidence": confidence
+            }
+
+        # ----------------------------------------------------------
+        # Zero-comma and 3+-comma families remain unresolved
+        # in version 1.
+        # ----------------------------------------------------------
+
+        return None
+
+    def _expand_joint_occurrences(
+            self,
+            entity_occurrences,
+            allowed_confidences=("High",)
+    ):
+        """
+        Replace safely parseable Joint occurrences with individual
+        Person occurrences.
+
+        Source-level provenance is preserved.
+
+        Parameters
+        ----------
+        entity_occurrences : pd.DataFrame
+            Entity-occurrence table after entity-type classification
+            but before occurrence_id is assigned.
+
+        allowed_confidences : iterable of str
+            Parse-confidence levels that are allowed to expand.
+
+            Default:
+                ("High",)
+
+            Medium-confidence parses remain as Joint rows so they can
+            be audited before being enabled.
+
+        Returns
+        -------
+        pd.DataFrame
+            Expanded entity-occurrence table.
+
+        Notes
+        -----
+        source_occurrence_id identifies the original source-cell
+        occurrence and may therefore appear more than once after
+        successful decomposition.
+
+        occurrence_id should be assigned only AFTER this method runs.
+        """
+
+        entity_occurrences = (
+            entity_occurrences.copy()
+        )
+
+        allowed_confidences = set(
+            allowed_confidences
+        )
+
+        valid_confidences = {
+            "High",
+            "Medium",
+            "Low"
+        }
+
+        invalid_confidences = (
+                allowed_confidences
+                - valid_confidences
+        )
+
+        if invalid_confidences:
+            raise ValueError(
+                "Invalid joint parse confidence level(s): "
+                f"{invalid_confidences}"
+            )
+
+        # ----------------------------------------------------------
+        # Validate expected lineage columns
+        # ----------------------------------------------------------
+
+        required_columns = {
+            "source_occurrence_id",
+            "source_entity_name",
+            "source_column",
+            "entity_name",
+            "entity_type",
+            "parcel_number",
+            "role",
+            "associated_address"
+        }
+
+        missing_columns = (
+                required_columns
+                - set(entity_occurrences.columns)
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "entity_occurrences is missing required "
+                "column(s) for Joint decomposition: "
+                f"{sorted(missing_columns)}"
+            )
+
+        # occurrence_id must represent the post-decomposition
+        # occurrence table, so it should not exist yet.
+        if "occurrence_id" in entity_occurrences.columns:
+            raise ValueError(
+                "occurrence_id was assigned before Joint "
+                "decomposition. Move occurrence_id assignment "
+                "until after _expand_joint_occurrences()."
+            )
+
+        # Before expansion, every source occurrence should still
+        # correspond to exactly one row.
+        if entity_occurrences[
+            "source_occurrence_id"
+        ].duplicated().any():
+            raise ValueError(
+                "Duplicate source_occurrence_id values exist before "
+                "Joint decomposition. _expand_joint_occurrences() "
+                "expects one row per source occurrence as input."
+            )
+
+        # ----------------------------------------------------------
+        # Prepare audit columns
+        # ----------------------------------------------------------
+
+        entity_occurrences[
+            "joint_parse_rule"
+        ] = ""
+
+        entity_occurrences[
+            "joint_parse_confidence"
+        ] = ""
+
+        entity_occurrences[
+            "joint_expanded"
+        ] = False
+
+        entity_occurrences[
+            "joint_party_index"
+        ] = pd.NA
+
+        entity_occurrences[
+            "joint_party_count"
+        ] = pd.NA
+
+        # ----------------------------------------------------------
+        # Expand safely parseable Joint rows
+        # ----------------------------------------------------------
+
+        expanded_rows = []
+
+        for _, row in entity_occurrences.iterrows():
+
+            # Non-Joint rows pass through untouched.
+            if row["entity_type"] != "Joint":
+                expanded_rows.append(
+                    row.to_dict()
+                )
+
+                continue
+
+            parse_result = self._parse_joint_name(
+                row["entity_name"]
+            )
+
+            # ------------------------------------------------------
+            # Parser could not safely interpret the Joint name.
+            # Keep the original Joint occurrence.
+            # ------------------------------------------------------
+
+            if parse_result is None:
+                expanded_rows.append(
+                    row.to_dict()
+                )
+
+                continue
+
+            rule = parse_result["rule"]
+
+            confidence = (
+                parse_result["confidence"]
+            )
+
+            parties = parse_result["parties"]
+
+            # ------------------------------------------------------
+            # Preserve parse metadata even when the confidence is
+            # not currently allowed to expand.
+            #
+            # This makes Medium candidates easy to audit.
+            # ------------------------------------------------------
+
+            if confidence not in allowed_confidences:
+                unresolved_row = row.copy()
+
+                unresolved_row[
+                    "joint_parse_rule"
+                ] = rule
+
+                unresolved_row[
+                    "joint_parse_confidence"
+                ] = confidence
+
+                unresolved_row[
+                    "joint_party_count"
+                ] = len(parties)
+
+                expanded_rows.append(
+                    unresolved_row.to_dict()
+                )
+
+                continue
+
+            # ------------------------------------------------------
+            # Replace the Joint occurrence with one Person row per
+            # successfully parsed party.
+            # ------------------------------------------------------
+
+            party_count = len(parties)
+
+            for party_index, party_name in enumerate(
+                    parties,
+                    start=1
+            ):
+                new_row = row.copy()
+
+                # entity_name now represents the derived individual.
+                #
+                # source_entity_name remains untouched and therefore
+                # retains the exact original Joint source value.
+                new_row[
+                    "entity_name"
+                ] = party_name
+
+                new_row[
+                    "entity_type"
+                ] = "Person"
+
+                new_row[
+                    "joint_parse_rule"
+                ] = rule
+
+                new_row[
+                    "joint_parse_confidence"
+                ] = confidence
+
+                new_row[
+                    "joint_expanded"
+                ] = True
+
+                new_row[
+                    "joint_party_index"
+                ] = party_index
+
+                new_row[
+                    "joint_party_count"
+                ] = party_count
+
+                expanded_rows.append(
+                    new_row.to_dict()
+                )
+
+        # ----------------------------------------------------------
+        # Rebuild dataframe
+        # ----------------------------------------------------------
+
+        expanded_entity_occurrences = pd.DataFrame(
+            expanded_rows
+        )
+
+        expanded_entity_occurrences = (
+            expanded_entity_occurrences
+            .reset_index(drop=True)
+        )
+
+        return expanded_entity_occurrences
+
+    # ----------------------------------------------------------
+    # Organization Subtype Classification
+    # ----------------------------------------------------------
 
     def _classify_organizations(self, entity_occurrences):
 
@@ -508,7 +1408,21 @@ class EntityResolver:
 
         return entity_occurrences
 
-    ############################################################
+    def _classify_organization(self, name):
+
+        if name == "":
+            return (None, None)
+
+        for pattern, (org_type, confidence) in self.organization_patterns.items():
+
+            if re.search(pattern, name):
+                return (org_type, confidence)
+
+        return ("Other Organization", "Low")
+
+    # ----------------------------------------------------------
+    # Occurrence Metadata and Finalization
+    # ----------------------------------------------------------
 
     def _assign_address_source(self, entity_occurrences):
 
@@ -518,8 +1432,6 @@ class EntityResolver:
         )
 
         return entity_occurrences
-
-    ############################################################
 
     def _assign_occurrence_ids(self, entity_occurrences):
 
@@ -533,20 +1445,6 @@ class EntityResolver:
         )
 
         return entity_occurrences
-
-    ############################################################
-
-    def _classify_organization(self, name):
-
-        if name == "":
-            return (None, None)
-
-        for pattern, (org_type, confidence) in self.organization_patterns.items():
-
-            if re.search(pattern, name):
-                return (org_type, confidence)
-
-        return ("Other Organization", "Low")
 
     ############################################################
     # Stage 2
