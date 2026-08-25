@@ -185,6 +185,62 @@ def main():
         f"{duplicate_entities:,}"
     )
 
+    #########################################################
+    # Three-way entity classification checks
+    #########################################################
+    entity_occurrences[
+        "entity_type"
+    ].value_counts(
+        dropna=False
+    )
+
+    unknown_names = (
+        entity_occurrences.loc[
+            entity_occurrences["entity_type"] == "Unknown",
+            "entity_name"
+        ]
+        .value_counts()
+        .rename_axis("entity_name")
+        .reset_index(name="occurrence_count")
+    )
+
+    print(
+        f"Unique Unknown names: "
+        f"{len(unknown_names):,}"
+    )
+
+    unknown_names.head(100)
+
+    unknown_joint_names = (
+        entity_occurrences[
+            (entity_occurrences["entity_type"] == "Unknown")
+            &
+            (
+                entity_occurrences["entity_name"]
+                .str.contains(
+                    r"&|\bAND\b|/",
+                    regex=True,
+                    na=False
+                )
+            )
+            ]
+    )
+
+    print(
+        f"Unknown occurrences containing joint-name markers: "
+        f"{len(unknown_joint_names):,}"
+    )
+
+    print(unknown_joint_names[
+        "entity_name"
+    ].value_counts().head(50))
+
+    unknown_entity_columns = entities.loc[
+        entities["entity_type"] == "Unknown"
+    ]
+
+    print(unknown_entity_columns.head(500))
+
 
 if __name__ == "__main__":
     main()

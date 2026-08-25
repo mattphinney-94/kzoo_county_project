@@ -363,24 +363,40 @@ class EntityResolver:
     ############################################################
 
     def _classify_entity_type(self, entity_occurrences):
+        """
+        Classify each entity occurrence as:
 
-        entity_occurrences = (
-            entity_occurrences.copy()
-        )
+            Person
+            Organization
+            Unknown
 
-        # Default classification for the current version.
-        entity_occurrences[
-            "entity_type"
-        ] = "Person"
+        Classification precedence:
+
+            1. Default to Unknown.
+            2. Organization patterns identify organizations.
+            3. Remaining names that can be safely parsed as individual
+               person names are classified as Person.
+            4. Explicit entity_type_overrides are applied last and take
+               precedence over all generalized rules.
+
+        Unknown is intentionally used when there is not enough evidence
+        to confidently classify a source value.
+        """
+
+        entity_occurrences = entity_occurrences.copy()
 
         # ----------------------------------------------------------
-        # Organization-pattern classification
+        # Default classification
+        # ----------------------------------------------------------
+
+        entity_occurrences["entity_type"] = "Unknown"
+
+        # ----------------------------------------------------------
+        # Organization classification
         # ----------------------------------------------------------
 
         organization_mask = (
-            entity_occurrences[
-                "entity_name"
-            ]
+            entity_occurrences["entity_name"]
             .str.contains(
                 self.organization_regex,
                 regex=True,
@@ -395,21 +411,64 @@ class EntityResolver:
         ] = "Organization"
 
         # ----------------------------------------------------------
+        # Person classification
+        # ----------------------------------------------------------
+
+        # Only inspect names that have not already been positively
+        # identified as organizations.
+        unknown_mask = (
+                entity_occurrences["entity_type"]
+                == "Unknown"
+        )
+
+        parsed_names = (
+            entity_occurrences.loc[
+                unknown_mask,
+                "entity_name"
+            ]
+            .apply(self._parse_person_name)
+        )
+
+        person_indexes = (
+            parsed_names[
+                parsed_names.notna()
+            ]
+            .index
+        )
+
+        entity_occurrences.loc[
+            person_indexes,
+            "entity_type"
+        ] = "Person"
+
+        # ----------------------------------------------------------
         # Explicit overrides
         # ----------------------------------------------------------
 
         overrides = (
-            entity_occurrences[
-                "entity_name"
-            ]
-            .map(
-                self.entity_type_overrides
-            )
+            entity_occurrences["entity_name"]
+            .map(self.entity_type_overrides)
         )
 
-        override_mask = (
-            overrides.notna()
+        # Protect against a typo in the override dictionary.
+        valid_entity_types = {
+            "Person",
+            "Organization",
+            "Unknown"
+        }
+
+        invalid_overrides = (
+                set(overrides.dropna())
+                - valid_entity_types
         )
+
+        if invalid_overrides:
+            raise ValueError(
+                "Invalid entity type(s) found in "
+                f"entity_type_overrides: {invalid_overrides}"
+            )
+
+        override_mask = overrides.notna()
 
         entity_occurrences.loc[
             override_mask,
