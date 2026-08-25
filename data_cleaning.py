@@ -16,6 +16,11 @@ ADDRESS_REPLACEMENTS = {
     "STREET": "ST",
     "TERRACE": "TER",
     "TRAIL": "TRL",
+    "APARTMENT": "APT",
+    "SUITE": "STE",
+    "BUILDING": "BLDG",
+    "FLOOR": "FL",
+    "ROOM": "RM",
     "NORTH": "N",
     "SOUTH": "S",
     "EAST": "E",
@@ -23,7 +28,7 @@ ADDRESS_REPLACEMENTS = {
     "NORTHEAST": "NE",
     "NORTHWEST": "NW",
     "SOUTHEAST": "SE",
-    "SOUTHWEST": "SW"
+    "SOUTHWEST": "SW",
 }
 
 ADDRESS_COLUMNS = [
@@ -59,7 +64,27 @@ class DataCleaner:
 
         address = str(address).upper().strip()
 
+        # Remove periods
+        address = address.replace(".", "")
+
+        # Collapse multiple spaces
         address = re.sub(r"\s+", " ", address)
+
+        # Standardize PO Box formatting
+        address = re.sub(
+            r"\bP\s*O\s*BOX\b",
+            "PO BOX",
+            address
+        )
+
+        address = re.sub(
+            r"\bPOST OFFICE BOX\b",
+            "PO BOX",
+            address
+        )
+
+        # Remove spaces around hyphens
+        address = re.sub(r"\s*-\s*", "-", address)
 
         for old, new in ADDRESS_REPLACEMENTS.items():
             address = re.sub(rf"\b{old}\b", new, address)
@@ -83,7 +108,14 @@ class DataCleaner:
 
         name = str(name).upper().strip()
 
+        # Collapse repeated whitespace
         name = re.sub(r"\s+", " ", name)
+
+        # Standardize spacing around hyphens
+        name = re.sub(r"\s*-\s*", "-", name)
+
+        # Standardize spacing around commas
+        name = re.sub(r"\s*,\s*", ", ", name)
 
         return name
 
