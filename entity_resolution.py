@@ -1810,6 +1810,10 @@ class EntityResolver:
                 entities
             )
 
+            entities = self._merge_missing_street_suffix_variants(
+                entities
+            )
+
             entities = self._merge_middle_initial_variants(
                 entities
             )
@@ -1880,6 +1884,183 @@ class EntityResolver:
 
         # Blank-address rows that received an address can now collapse
         # with the corresponding known-address entity.
+        entities = self._merge_on_key(
+            entities,
+            [
+                "entity_type",
+                "canonical_name",
+                "canonical_address"
+            ]
+        )
+
+        return entities
+
+    def _merge_missing_street_suffix_variants(self, entities):
+        """
+        Merge otherwise identical entities when their addresses differ
+        only because one address omits a street suffix.
+
+        Requirements:
+            - Entity type must match.
+            - Canonical name must match exactly.
+            - Street base must match exactly.
+            - Locality must match exactly.
+            - Unit information must match exactly.
+            - At least one address must omit the street suffix.
+            - Exactly one distinct nonblank street suffix may exist.
+
+        Example that can merge:
+
+            WIDGER JAMES LEROY
+            214 MARSHALL, ALLEGAN, MI 49010
+
+            WIDGER JAMES LEROY
+            214 MARSHALL ST, ALLEGAN, MI 49010
+
+        Example that will NOT merge:
+
+            214 MARSHALL ST, ALLEGAN, MI 49010
+            214 MARSHALL AVE, ALLEGAN, MI 49010
+
+        because there are conflicting known suffixes.
+        """
+
+        entities = entities.copy().reset_index(
+            drop=True
+        )
+
+        parsed_rows = []
+
+        # ----------------------------------------------------------
+        # Parse candidate addresses
+        # ----------------------------------------------------------
+
+        for index, row in entities.iterrows():
+
+            parsed = self._parse_address_for_suffix_matching(
+                row["canonical_address"]
+            )
+
+            if parsed is None:
+                continue
+
+            parsed_rows.append({
+                "row_index": index,
+                "entity_type": row["entity_type"],
+                "canonical_name": row["canonical_name"],
+                "canonical_address": row["canonical_address"],
+                "street_base": parsed["street_base"],
+                "street_suffix": parsed["street_suffix"],
+                "unit": parsed["unit"],
+                "locality": parsed["locality"]
+            })
+
+        if not parsed_rows:
+            return entities
+
+        candidates = pd.DataFrame(
+            parsed_rows
+        )
+
+        # ----------------------------------------------------------
+        # Find unambiguous missing-suffix groups
+        # ----------------------------------------------------------
+
+        grouping_columns = [
+            "entity_type",
+            "canonical_name",
+            "street_base",
+            "unit",
+            "locality"
+        ]
+
+        for _, group in candidates.groupby(
+                grouping_columns,
+                dropna=False,
+                sort=False
+        ):
+
+            if len(group) < 2:
+                continue
+
+            suffixes = set(
+                group["street_suffix"]
+            )
+
+            nonblank_suffixes = {
+                suffix
+                for suffix in suffixes
+                if suffix
+            }
+
+            # There must be at least one suffix-free representation.
+            if "" not in suffixes:
+                continue
+
+            # Exactly one known suffix must exist.
+            #
+            # Safe:
+            #     MARSHALL
+            #     MARSHALL ST
+            #
+            # Unsafe:
+            #     MARSHALL
+            #     MARSHALL ST
+            #     MARSHALL AVE
+            if len(nonblank_suffixes) != 1:
+                continue
+
+            known_suffix = next(
+                iter(nonblank_suffixes)
+            )
+
+            # ------------------------------------------------------
+            # Use an address that actually appeared in the data.
+            # Do not synthesize a new canonical address.
+            # ------------------------------------------------------
+
+            suffixed_rows = group[
+                group["street_suffix"]
+                == known_suffix
+                ]
+
+            suffixed_addresses = (
+                suffixed_rows[
+                    "canonical_address"
+                ]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            # More than one supposedly equivalent complete address
+            # means there is some additional variation that this rule
+            # should not resolve.
+            if len(suffixed_addresses) != 1:
+                continue
+
+            preferred_address = (
+                suffixed_addresses[0]
+            )
+
+            # Assign the known complete address only to rows whose
+            # street suffix is missing.
+            blank_suffix_rows = group[
+                group["street_suffix"] == ""
+                ]
+
+            for row_index in blank_suffix_rows[
+                "row_index"
+            ]:
+                entities.at[
+                    row_index,
+                    "canonical_address"
+                ] = preferred_address
+
+        # ----------------------------------------------------------
+        # Rows whose missing suffix was resolved can now collapse
+        # using the ordinary exact-key merge infrastructure.
+        # ----------------------------------------------------------
+
         entities = self._merge_on_key(
             entities,
             [
@@ -2768,6 +2949,143 @@ class EntityResolver:
             return False
 
         return True
+
+    def _parse_address_for_suffix_matching(self, address):
+        """
+        Parse a normalized mailing address into components used only
+        for missing-street-suffix entity resolution.
+
+        Returns None for addresses that cannot be interpreted safely.
+
+        The original canonical_address is never modified here.
+        """
+
+        STREET_SUFFIXES = {
+            "ST",
+            "AVE",
+            "RD",
+            "DR",
+            "BLVD",
+            "LN",
+            "CT",
+            "CIR",
+            "PL",
+            "PKWY",
+            "TER",
+            "HWY",
+            "WAY",
+            "TRL"
+        }
+
+        UNIT_MARKERS = {
+            "APT",
+            "STE",
+            "UNIT",
+            "BLDG",
+            "FL",
+            "RM"
+        }
+
+        if pd.isna(address):
+            return None
+
+        address = str(address).strip()
+
+        if not address:
+            return None
+
+        parts = [
+            part.strip()
+            for part in address.split(",")
+        ]
+
+        # Require at least:
+        #
+        #     street, locality
+        #
+        # Example:
+        #     214 MARSHALL ST, ALLEGAN, MI 49010
+        if len(parts) < 2:
+            return None
+
+        street_line = parts[0]
+
+        # PO Boxes do not participate in street-suffix matching.
+        if street_line.startswith("PO BOX"):
+            return None
+
+        locality = ", ".join(parts[1:])
+
+        tokens = street_line.split()
+
+        if len(tokens) < 2:
+            return None
+
+        # Require the first street token to contain a number.
+        #
+        # This prevents the rule from attempting to interpret
+        # non-street address-like strings.
+        if not any(
+                character.isdigit()
+                for character in tokens[0]
+        ):
+            return None
+
+        # ----------------------------------------------------------
+        # Separate unit information
+        # ----------------------------------------------------------
+
+        unit_index = None
+
+        for i, token in enumerate(tokens):
+
+            if (
+                    token in UNIT_MARKERS
+                    or token.startswith("#")
+            ):
+                unit_index = i
+                break
+
+        if unit_index is not None:
+
+            street_tokens = tokens[:unit_index]
+            unit_tokens = tokens[unit_index:]
+
+        else:
+
+            street_tokens = tokens
+            unit_tokens = []
+
+        if len(street_tokens) < 2:
+            return None
+
+        # ----------------------------------------------------------
+        # Detect the street suffix
+        # ----------------------------------------------------------
+
+        if street_tokens[-1] in STREET_SUFFIXES:
+
+            street_suffix = street_tokens[-1]
+            street_base_tokens = street_tokens[:-1]
+
+        else:
+
+            street_suffix = ""
+            street_base_tokens = street_tokens
+
+        if not street_base_tokens:
+            return None
+
+        return {
+            "street_base": " ".join(
+                street_base_tokens
+            ),
+            "street_suffix": street_suffix,
+            "unit": " ".join(
+                unit_tokens
+            ),
+            "locality": locality
+        }
 
     # ----------------------------------------------------------
     # Canonicalization Helpers
