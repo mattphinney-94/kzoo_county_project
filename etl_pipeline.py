@@ -48,7 +48,9 @@ def main():
         clean_df
     )
 
+    sample_entities = entity_occurrences.sample(n=50)
 
+    print(sample_entities.head(50))
 
 if __name__ == "__main__":
     main()

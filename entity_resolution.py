@@ -286,8 +286,15 @@ class EntityResolver:
             .astype(int)
         )
 
+        # Create the parcel_entity_roles dataframe
+        parcel_entity_roles = (
+            self._create_parcel_entity_roles(
+                entity_occurrences,
+                entities
+            )
+        )
+
         # Later stages
-        parcel_entity_roles = pd.DataFrame()
         association_evidence = pd.DataFrame()
         entity_associations = pd.DataFrame()
 
@@ -3690,11 +3697,154 @@ class EntityResolver:
     # Parcel Entity Roles
     ############################################################
 
-    def _create_parcel_entity_roles(self,
-                                    entity_occurrences,
-                                    entities):
-        raise NotImplementedError
+    def _create_parcel_entity_roles(
+            self,
+            entity_occurrences,
+            entities
+    ):
+        """
+        Create the parcel-to-entity role junction table.
 
+        Grain
+        -----
+        One row represents one unique relationship between:
+
+            parcel_number
+            entity_id
+            role
+
+        Multiple source occurrences that resolve to the same entity
+        on the same parcel in the same role are collapsed into one
+        relationship.
+
+        Detailed source provenance remains in entity_occurrences.
+        """
+
+        # ----------------------------------------------------------
+        # Validate required columns
+        # ----------------------------------------------------------
+
+        required_occurrence_columns = {
+            "parcel_number",
+            "entity_id",
+            "role"
+        }
+
+        missing_occurrence_columns = (
+                required_occurrence_columns
+                - set(entity_occurrences.columns)
+        )
+
+        if missing_occurrence_columns:
+            raise ValueError(
+                "entity_occurrences is missing required "
+                "column(s) for parcel entity roles: "
+                f"{sorted(missing_occurrence_columns)}"
+            )
+
+        if "entity_id" not in entities.columns:
+            raise ValueError(
+                "entities must contain entity_id before "
+                "parcel entity roles are created."
+            )
+
+        # ----------------------------------------------------------
+        # Validate entity IDs
+        # ----------------------------------------------------------
+
+        if entity_occurrences[
+            "entity_id"
+        ].isna().any():
+            raise ValueError(
+                "Cannot create parcel entity roles because "
+                "some entity occurrences do not have an entity_id."
+            )
+
+        if entities[
+            "entity_id"
+        ].duplicated().any():
+            raise ValueError(
+                "entities contains duplicate entity_id values."
+            )
+
+        valid_entity_ids = set(
+            entities["entity_id"]
+        )
+
+        occurrence_entity_ids = set(
+            entity_occurrences["entity_id"]
+        )
+
+        invalid_entity_ids = (
+                occurrence_entity_ids
+                - valid_entity_ids
+        )
+
+        if invalid_entity_ids:
+            raise ValueError(
+                "entity_occurrences contains entity_id values "
+                "that do not exist in entities: "
+                f"{sorted(invalid_entity_ids)[:10]}"
+            )
+
+        # ----------------------------------------------------------
+        # Validate roles
+        # ----------------------------------------------------------
+
+        valid_roles = {
+            info["role"]
+            for info in self.role_mapping.values()
+        }
+
+        occurrence_roles = set(
+            entity_occurrences["role"]
+            .dropna()
+        )
+
+        invalid_roles = (
+                occurrence_roles
+                - valid_roles
+        )
+
+        if invalid_roles:
+            raise ValueError(
+                "Unexpected parcel entity role(s): "
+                f"{sorted(invalid_roles)}"
+            )
+
+        if entity_occurrences[
+            "role"
+        ].isna().any():
+            raise ValueError(
+                "Cannot create parcel entity roles because "
+                "some entity occurrences have a missing role."
+            )
+
+        # ----------------------------------------------------------
+        # Create unique parcel/entity/role relationships
+        # ----------------------------------------------------------
+
+        parcel_entity_roles = (
+            entity_occurrences[
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "role"
+                ]
+            ]
+            .drop_duplicates()
+            .sort_values(
+                by=[
+                    "parcel_number",
+                    "entity_id",
+                    "role"
+                ],
+                kind="stable"
+            )
+            .reset_index(drop=True)
+        )
+
+        return parcel_entity_roles
     ############################################################
     # Stage 5
     # Association Evidence
