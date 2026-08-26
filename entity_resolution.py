@@ -215,7 +215,8 @@ class EntityResolver:
             "CASH N A FLASH": "Organization",
             "MICHIGAN FAST CASH FLIP": "Organization",
             "HOPE THRU NAVIGATION": "Organization",
-            "PAYMENT IN LIEU OF TAXES": "Unknown"
+            "PAYMENT IN LIEU OF TAXES": "Unknown",
+            "FIRE HISTORICAL & CULTURAL ARTS": "Organization"
         }
 
         self.entity_name_replacements = {
@@ -1103,9 +1104,284 @@ class EntityResolver:
             }
 
         # ----------------------------------------------------------
-        # Zero-comma and 3+-comma families remain unresolved
-        # in version 1.
+        # Family 3:
+        #
+        # Zero-comma, single-ampersand records.
+        #
+        # Several conservative subfamilies are supported.
         # ----------------------------------------------------------
+
+        if candidate.count(",") == 0:
+
+            left_tokens = left.split()
+            right_tokens = right.split()
+
+            if not left_tokens or not right_tokens:
+                return None
+
+            suffixes = {
+                "JR",
+                "JUNIOR",
+                "SR",
+                "SENIOR",
+                "II",
+                "III",
+                "IV"
+            }
+
+            # ------------------------------------------------------
+            # 3A. Same leading surname explicitly repeated
+            #
+            # STECK MARLENE & STECK DORA
+            #
+            # -> STECK, MARLENE
+            # -> STECK, DORA
+            #
+            # No surname inference is necessary.
+            # ------------------------------------------------------
+
+            if (
+                    len(left_tokens) >= 2
+                    and len(right_tokens) >= 2
+                    and left_tokens[0] == right_tokens[0]
+            ):
+
+                surname = left_tokens[0]
+
+                party_1 = (
+                    f"{surname}, "
+                    f"{' '.join(left_tokens[1:])}"
+                )
+
+                party_2 = (
+                    f"{surname}, "
+                    f"{' '.join(right_tokens[1:])}"
+                )
+
+                if (
+                        self._parse_person_name(party_1) is None
+                        or self._parse_person_name(party_2) is None
+                ):
+                    return None
+
+                return {
+                    "parties": [
+                        party_1,
+                        party_2
+                    ],
+                    "rule": "explicit_shared_surname_no_comma",
+                    "confidence": "High"
+                }
+
+            # ------------------------------------------------------
+            # 3B. Symmetric surname + first-initial structure
+            #
+            # SAUNDERS R & FARQUHAR D
+            #
+            # -> SAUNDERS, R
+            # -> FARQUHAR, D
+            #
+            # Both sides independently have exactly:
+            #
+            #     SURNAME INITIAL
+            #
+            # so do not infer a shared surname.
+            # ------------------------------------------------------
+
+            if (
+                    len(left_tokens) == 2
+                    and len(right_tokens) == 2
+                    and len(left_tokens[1]) == 1
+                    and len(right_tokens[1]) == 1
+                    and len(left_tokens[0]) > 1
+                    and len(right_tokens[0]) > 1
+            ):
+
+                party_1 = (
+                    f"{left_tokens[0]}, "
+                    f"{left_tokens[1]}"
+                )
+
+                party_2 = (
+                    f"{right_tokens[0]}, "
+                    f"{right_tokens[1]}"
+                )
+
+                if (
+                        self._parse_person_name(party_1) is None
+                        or self._parse_person_name(party_2) is None
+                ):
+                    return None
+
+                return {
+                    "parties": [
+                        party_1,
+                        party_2
+                    ],
+                    "rule": "explicit_surnames_initials_no_comma",
+                    "confidence": "Medium"
+                }
+
+            # ------------------------------------------------------
+            # 3C. One-token right side:
+            # infer shared leading surname.
+            #
+            # BURROUGHS CHERYL & HOWARD
+            #
+            # -> BURROUGHS, CHERYL
+            # -> BURROUGHS, HOWARD
+            # ------------------------------------------------------
+
+            if (
+                    len(left_tokens) >= 2
+                    and len(right_tokens) == 1
+            ):
+
+                surname = left_tokens[0]
+
+                party_1 = (
+                    f"{surname}, "
+                    f"{' '.join(left_tokens[1:])}"
+                )
+
+                party_2 = (
+                    f"{surname}, "
+                    f"{right_tokens[0]}"
+                )
+
+                if (
+                        self._parse_person_name(party_1) is None
+                        or self._parse_person_name(party_2) is None
+                ):
+                    return None
+
+                return {
+                    "parties": [
+                        party_1,
+                        party_2
+                    ],
+                    "rule": "shared_surname_single_right_name",
+                    "confidence": "High"
+                }
+
+            # ------------------------------------------------------
+            # 3D. Right side = FIRST + MIDDLE INITIAL:
+            # infer shared leading surname.
+            #
+            # BRINKS JOSEPH H & DARLENE L
+            #
+            # -> BRINKS, JOSEPH H
+            # -> BRINKS, DARLENE L
+            #
+            # The symmetric SURNAME INITIAL & SURNAME INITIAL case
+            # was already handled above.
+            # ------------------------------------------------------
+
+            if (
+                    len(left_tokens) >= 2
+                    and len(right_tokens) == 2
+                    and len(right_tokens[0]) > 1
+                    and len(right_tokens[1]) == 1
+            ):
+
+                surname = left_tokens[0]
+
+                party_1 = (
+                    f"{surname}, "
+                    f"{' '.join(left_tokens[1:])}"
+                )
+
+                party_2 = (
+                    f"{surname}, "
+                    f"{' '.join(right_tokens)}"
+                )
+
+                if (
+                        self._parse_person_name(party_1) is None
+                        or self._parse_person_name(party_2) is None
+                ):
+                    return None
+
+                return {
+                    "parties": [
+                        party_1,
+                        party_2
+                    ],
+                    "rule": "shared_surname_initial_no_comma",
+                    "confidence": "Medium"
+                }
+
+            # ------------------------------------------------------
+            # 3E. Shared trailing surname.
+            #
+            # FRED & LILLIAN COCHRAN
+            #
+            # -> COCHRAN, FRED
+            # -> COCHRAN, LILLIAN
+            #
+            # This is intentionally limited to cases where the left
+            # side contains exactly one token.
+            #
+            # Do not apply this rule to routing-prefixed source
+            # values such as:
+            #
+            #     C/O SCOFIELD & VAN DENBELDT
+            # ------------------------------------------------------
+
+            raw_name = self._normalize_match_name(name)
+
+            has_routing_prefix = bool(
+                re.match(
+                    r"^(?:C\s*/\s*O|ATTN\s*:|%)",
+                    raw_name
+                )
+            )
+
+            if (
+                    len(left_tokens) == 1
+                    and len(right_tokens) >= 2
+                    and not has_routing_prefix
+            ):
+
+                surname = right_tokens[-1]
+
+                person_2_given_tokens = (
+                    right_tokens[:-1]
+                )
+
+                if not person_2_given_tokens:
+                    return None
+
+                party_1 = (
+                    f"{surname}, "
+                    f"{left_tokens[0]}"
+                )
+
+                party_2 = (
+                    f"{surname}, "
+                    f"{' '.join(person_2_given_tokens)}"
+                )
+
+                if (
+                        self._parse_person_name(party_1) is None
+                        or self._parse_person_name(party_2) is None
+                ):
+                    return None
+
+                return {
+                    "parties": [
+                        party_1,
+                        party_2
+                    ],
+                    "rule": "shared_trailing_surname_no_comma",
+                    "confidence": "Medium"
+                }
+
+            # ------------------------------------------------------
+            # Other zero-comma structures remain unresolved.
+            # ------------------------------------------------------
+
+            return None
 
         return None
 
