@@ -495,11 +495,6 @@ class EntityResolver:
             "entity_type"
         ] = "Person"
 
-        entity_occurrences.loc[
-            person_indexes,
-            "entity_type"
-        ] = "Person"
-
         # ----------------------------------------------------------
         # Explicit overrides
         # ----------------------------------------------------------
@@ -1814,11 +1809,15 @@ class EntityResolver:
                 entities
             )
 
-            entities = self._merge_middle_initial_variants(
+            entities = self._merge_zip4_variants(
                 entities
             )
 
-            entities = self._merge_suffix_variants(
+            entities = self._merge_equivalent_person_name_formats(
+                entities
+            )
+
+            entities = self._merge_middle_initial_variants(
                 entities
             )
 
@@ -2072,6 +2071,372 @@ class EntityResolver:
 
         return entities
 
+    def _merge_zip4_variants(self, entities):
+        """
+        Merge exactly same-named entities whose canonical addresses differ
+        only because one contains ZIP+4 information and another contains
+        only the corresponding five-digit ZIP.
+
+        Requirements:
+            - Entity type must match.
+            - Canonical name must match exactly.
+            - All address content before the ZIP must match exactly.
+            - Five-digit ZIP must match.
+            - At least one address must omit ZIP+4.
+            - Exactly one distinct nonblank ZIP+4 may exist.
+
+        The ZIP+4 address is preferred because it contains more information,
+        but only an address that actually occurred in the data is used.
+
+        Examples that can merge:
+
+            10440 N 24TH ST, PLAINWELL, MI 49080
+            10440 N 24TH ST, PLAINWELL, MI 49080-8903
+
+            PO BOX 365, GALESBURG, MI 49053
+            PO BOX 365, GALESBURG, MI 49053-0365
+        """
+
+        entities = entities.copy().reset_index(
+            drop=True
+        )
+
+        candidate_rows = []
+
+        # ----------------------------------------------------------
+        # Build ZIP-insensitive address representations
+        # ----------------------------------------------------------
+
+        for index, row in entities.iterrows():
+
+            address = row["canonical_address"]
+
+            parsed = self._parse_zip4_for_matching(
+                address
+            )
+
+            if parsed is None:
+                continue
+
+            candidate_rows.append({
+                "row_index":
+                    index,
+
+                "entity_type":
+                    row["entity_type"],
+
+                "canonical_name":
+                    row["canonical_name"],
+
+                "canonical_address":
+                    address,
+
+                "address_match_key":
+                    parsed["address_match_key"],
+
+                "zip4":
+                    parsed["zip4"]
+            })
+
+        if not candidate_rows:
+            return entities
+
+        candidates = pd.DataFrame(
+            candidate_rows
+        )
+
+        # ----------------------------------------------------------
+        # Find unambiguous ZIP+4 variant groups
+        # ----------------------------------------------------------
+
+        group_columns = [
+            "entity_type",
+            "canonical_name",
+            "address_match_key"
+        ]
+
+        for _, group in candidates.groupby(
+                group_columns,
+                dropna=False,
+                sort=False
+        ):
+
+            if len(group) < 2:
+                continue
+
+            zip4_values = set(
+                group["zip4"]
+            )
+
+            nonblank_zip4_values = {
+                zip4
+                for zip4 in zip4_values
+                if zip4
+            }
+
+            # This rule requires both:
+            #
+            #     ZIP5-only
+            #     ZIP5+4
+            #
+            if "" not in zip4_values:
+                continue
+
+            # Do not resolve conflicting ZIP+4 values.
+            #
+            # Example:
+            #
+            #     49048
+            #     49048-1111
+            #     49048-2222
+            #
+            if len(nonblank_zip4_values) != 1:
+                continue
+
+            known_zip4 = next(
+                iter(nonblank_zip4_values)
+            )
+
+            # Find the actual source address containing the unique ZIP+4.
+            zip4_rows = group[
+                group["zip4"] == known_zip4
+                ]
+
+            preferred_addresses = (
+                zip4_rows[
+                    "canonical_address"
+                ]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            # Some additional unexplained address variation exists.
+            # Leave it unresolved.
+            if len(preferred_addresses) != 1:
+                continue
+
+            preferred_address = (
+                preferred_addresses[0]
+            )
+
+            # Give every member of this proven-equivalent group the
+            # more informative address representation.
+            for row_index in group[
+                "row_index"
+            ]:
+                entities.at[
+                    row_index,
+                    "canonical_address"
+                ] = preferred_address
+
+        # Rows standardized above can now collapse using persistent,
+        # ordinary entity columns.
+        return self._merge_on_key(
+            entities,
+            [
+                "entity_type",
+                "canonical_name",
+                "canonical_address"
+            ]
+        )
+
+    def _merge_equivalent_person_name_formats(self, entities):
+        """
+        Merge Person entities whose names are formatted differently but
+        parse to exactly the same person-name components.
+
+        ZIP5 and ZIP+4 versions of an otherwise identical address are
+        considered equivalent when there is no conflicting ZIP+4 value.
+
+        Missing versus explicit name information is NOT treated as
+        equivalent.
+
+        Examples that can merge:
+
+            DERRING III, ALBERT
+            DERRING, ALBERT III
+
+        Examples that will NOT merge:
+
+            DERRING, ALBERT
+            DERRING, ALBERT III
+
+            LINDSEY, WILLIAM B
+            LINDSEY, WILLIAM B JR
+        """
+
+        entities = entities.copy().reset_index(
+            drop=True
+        )
+
+        candidate_rows = []
+
+        for index, row in entities.iterrows():
+
+            if row["entity_type"] != "Person":
+                continue
+
+            address = row["canonical_address"]
+
+            if (
+                    pd.isna(address)
+                    or str(address).strip() == ""
+            ):
+                continue
+
+            parsed_name = self._parse_person_name(
+                row["canonical_name"]
+            )
+
+            if parsed_name is None:
+                continue
+
+            parsed_address = (
+                self._parse_zip4_for_matching(
+                    address
+                )
+            )
+
+            if parsed_address is None:
+                continue
+
+            candidate_rows.append({
+                "row_index":
+                    index,
+
+                "canonical_address":
+                    address,
+
+                "address_match_key":
+                    parsed_address[
+                        "address_match_key"
+                    ],
+
+                "zip4":
+                    parsed_address["zip4"],
+
+                "last_name":
+                    parsed_name["last_name"],
+
+                "first_name":
+                    parsed_name["first_name"],
+
+                "middle_tokens":
+                    parsed_name["middle_tokens"],
+
+                "suffix":
+                    parsed_name["suffix"]
+            })
+
+        if not candidate_rows:
+            return entities
+
+        candidates = pd.DataFrame(
+            candidate_rows
+        )
+
+        groups_to_merge = []
+
+        group_columns = [
+            "address_match_key",
+            "last_name",
+            "first_name",
+            "middle_tokens",
+            "suffix"
+        ]
+
+        for _, group in candidates.groupby(
+                group_columns,
+                dropna=False,
+                sort=False
+        ):
+
+            if len(group) < 2:
+                continue
+
+            indexes = (
+                group["row_index"]
+                .tolist()
+            )
+
+            canonical_names = {
+                entities.at[
+                    index,
+                    "canonical_name"
+                ]
+                for index in indexes
+            }
+
+            canonical_addresses = {
+                entities.at[
+                    index,
+                    "canonical_address"
+                ]
+                for index in indexes
+            }
+
+            # Nothing actually differs.
+            if (
+                    len(canonical_names) < 2
+                    and len(canonical_addresses) < 2
+            ):
+                continue
+
+            # ------------------------------------------------------
+            # Reject conflicting ZIP+4 information
+            # ------------------------------------------------------
+
+            nonblank_zip4_values = {
+                zip4
+                for zip4 in group["zip4"]
+                if zip4
+            }
+
+            if len(nonblank_zip4_values) > 1:
+                continue
+
+            # ------------------------------------------------------
+            # Prefer the actual ZIP+4 representation when available
+            # ------------------------------------------------------
+
+            if len(nonblank_zip4_values) == 1:
+
+                known_zip4 = next(
+                    iter(nonblank_zip4_values)
+                )
+
+                preferred_addresses = (
+                    group.loc[
+                        group["zip4"]
+                        == known_zip4,
+                        "canonical_address"
+                    ]
+                    .drop_duplicates()
+                    .tolist()
+                )
+
+                if len(preferred_addresses) != 1:
+                    continue
+
+                preferred_address = (
+                    preferred_addresses[0]
+                )
+
+                for row_index in indexes:
+                    entities.at[
+                        row_index,
+                        "canonical_address"
+                    ] = preferred_address
+
+            groups_to_merge.append(
+                indexes
+            )
+
+        return self._collapse_index_groups(
+            entities,
+            groups_to_merge
+        )
+
     def _merge_middle_initial_variants(self, entities):
         """
         Merge person entities that differ only in middle-name detail when
@@ -2201,116 +2566,6 @@ class EntityResolver:
                 groups_to_merge.append(
                     group["row_index"].tolist()
                 )
-
-        return self._collapse_index_groups(
-            entities,
-            groups_to_merge
-        )
-
-    def _merge_suffix_variants(self, entities):
-        """
-        Merge person entities that differ only because one record contains
-        a suffix and another does not, but only when there is exactly one
-        nonblank suffix represented in the candidate group.
-
-        Requirements:
-            - Entity must be a Person.
-            - Address must be identical and nonblank.
-            - First, last, and middle names must match.
-            - There must not be conflicting suffixes.
-
-        Example that can merge:
-            SMITH, JOHN
-            SMITH, JOHN JR
-
-        Example that will NOT merge:
-            SMITH, JOHN
-            SMITH, JOHN JR
-            SMITH, JOHN SR
-
-        because the suffix-free record is ambiguous.
-        """
-
-        entities = entities.copy().reset_index(drop=True)
-
-        candidate_rows = []
-
-        for index, row in entities.iterrows():
-
-            if row["entity_type"] != "Person":
-                continue
-
-            address = row["canonical_address"]
-
-            if pd.isna(address) or str(address).strip() == "":
-                continue
-
-            parsed = self._parse_person_name(
-                row["canonical_name"]
-            )
-
-            if parsed is None:
-                continue
-
-            candidate_rows.append({
-                "row_index": index,
-                "canonical_address": address,
-                "last_name": parsed["last_name"],
-                "first_name": parsed["first_name"],
-                "middle_tokens": parsed["middle_tokens"],
-                "suffix": parsed["suffix"]
-            })
-
-        if not candidate_rows:
-            return entities
-
-        candidates = pd.DataFrame(candidate_rows)
-
-        groups_to_merge = []
-
-        group_columns = [
-            "canonical_address",
-            "last_name",
-            "first_name",
-            "middle_tokens"
-        ]
-
-        for _, group in candidates.groupby(
-                group_columns,
-                dropna=False,
-                sort=False
-        ):
-
-            if len(group) < 2:
-                continue
-
-            suffixes = set(
-                group["suffix"].tolist()
-            )
-
-            nonblank_suffixes = {
-                suffix
-                for suffix in suffixes
-                if suffix != ""
-            }
-
-            # No suffix information exists, so this isn't a suffix
-            # variation.
-            if not nonblank_suffixes:
-                continue
-
-            # More than one suffix means the group is ambiguous.
-            #
-            # For example:
-            # JOHN SMITH
-            # JOHN SMITH JR
-            # JOHN SMITH SR
-            if len(nonblank_suffixes) > 1:
-                continue
-
-            groups_to_merge.append(
-                group["row_index"].tolist()
-            )
 
         return self._collapse_index_groups(
             entities,
@@ -2950,6 +3205,88 @@ class EntityResolver:
 
         return True
 
+    def _normalize_zip4_for_matching(self, address):
+        """
+        Create an address representation for matching in which ZIP+4
+        is reduced to its five-digit ZIP.
+
+        This does not modify the canonical address stored in the
+        final entities table.
+
+        Examples
+        --------
+        3041 N 26TH ST, KALAMAZOO, MI 49048-4827
+            -> 3041 N 26TH ST, KALAMAZOO, MI 49048
+
+        3041 N 26TH ST, KALAMAZOO, MI 49048
+            -> unchanged
+
+        PO BOX 365, GALESBURG, MI 49053-0365
+            -> PO BOX 365, GALESBURG, MI 49053
+        """
+
+        if pd.isna(address):
+            return ""
+
+        address = str(address).strip()
+
+        if not address:
+            return ""
+
+        return re.sub(
+            r"(\b\d{5})-\d{4}\b",
+            r"\1",
+            address
+        )
+
+    def _parse_zip4_for_matching(self, address):
+        """
+        Parse a normalized mailing address for ZIP+4 matching.
+
+        Returns
+        -------
+        dict or None
+
+        {
+            "address_match_key": address with ZIP+4 reduced to ZIP5,
+            "zip5": five-digit ZIP,
+            "zip4": four-digit extension or ""
+        }
+
+        The canonical address itself is not modified here.
+        """
+
+        if pd.isna(address):
+            return None
+
+        address = str(address).strip()
+
+        if not address:
+            return None
+
+        match = re.search(
+            r"^(.*\D)(\d{5})(?:-(\d{4}))?$",
+            address
+        )
+
+        if match is None:
+            return None
+
+        address_prefix = match.group(1)
+        zip5 = match.group(2)
+        zip4 = match.group(3) or ""
+
+        return {
+            "address_match_key":
+                f"{address_prefix}{zip5}".strip(),
+
+            "zip5":
+                zip5,
+
+            "zip4":
+                zip4
+        }
+
     def _parse_address_for_suffix_matching(self, address):
         """
         Parse a normalized mailing address into components used only
@@ -3133,7 +3470,7 @@ class EntityResolver:
             score += 5
 
         # Reward suffixes
-        if re.search(r"\b(JR|SR|II|III|IV|V)\b", name):
+        if re.search(r"\b(JR|SR|II|III|IV)\b", name):
             score += 5
 
         return score
