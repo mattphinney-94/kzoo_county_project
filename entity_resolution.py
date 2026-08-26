@@ -1821,10 +1821,9 @@ class EntityResolver:
                 entities
             )
 
-            # Transformation-based matching
-            entities = self._merge_on_match_key(
-                entities,
-                self._expand_common_abbreviations
+            # Organization name normalization
+            entities = self._merge_organization_name_variants(
+                entities
             )
 
             count_after = len(entities)
@@ -2576,6 +2575,85 @@ class EntityResolver:
     # Resolution Infrastructure
     # ----------------------------------------------------------
 
+    def _merge_organization_name_variants(self, entities):
+        """
+        Merge Organization entities at the same canonical address when
+        lightweight punctuation normalization and known organization-name
+        abbreviation expansion produce the same matching representation.
+
+        Current abbreviation expansions:
+
+            CORP -> CORPORATION
+            INC  -> INCORPORATED
+            CO   -> COMPANY
+
+        This rule applies only to Organization entities.
+        """
+
+        entities = entities.copy().reset_index(
+            drop=True
+        )
+
+        organization_mask = (
+                entities["entity_type"]
+                == "Organization"
+        )
+
+        organizations = (
+            entities.loc[
+                organization_mask
+            ]
+            .copy()
+        )
+
+        other_entities = (
+            entities.loc[
+                ~organization_mask
+            ]
+            .copy()
+        )
+
+        if organizations.empty:
+            return entities
+
+        organizations["match_name"] = (
+            organizations["canonical_name"]
+            .apply(
+                self._expand_common_abbreviations
+            )
+        )
+
+        organizations = self._merge_on_key(
+            organizations,
+            [
+                "entity_type",
+                "match_name",
+                "canonical_address"
+            ]
+        )
+
+        organizations = organizations.drop(
+            columns="match_name",
+            errors="ignore"
+        )
+
+        result = pd.concat(
+            [
+                organizations,
+                other_entities
+            ],
+            ignore_index=True
+        )
+
+        # Preserve the original entity-table schema.
+        result = result[
+            entities.columns
+        ]
+
+        return result.reset_index(
+            drop=True
+        )
+
     def _merge_on_match_key(self, entities, transform_function):
         """
         Apply a name transformation to create a temporary matching key,
@@ -2746,15 +2824,30 @@ class EntityResolver:
         Each item in groups_to_merge should be a list of DataFrame
         row indexes that have already been determined to represent
         the same entity.
+
+        A row may belong to at most one merge group during a single
+        resolution-rule pass. Overlapping groups indicate an error
+        in the rule that constructed groups_to_merge.
         """
 
-        entities = entities.copy().reset_index(drop=True)
+        entities = entities.copy().reset_index(
+            drop=True
+        )
 
         replacements = {}
+
+        # Indexes that should be omitted from the output because they
+        # were merged into another row.
         consumed_indexes = set()
+
+        # Every index assigned to a merge group, including anchors.
+        # This is used only to detect overlapping merge groups.
+        claimed_indexes = set()
 
         for indexes in groups_to_merge:
 
+            # Remove duplicate indexes within the same proposed group
+            # while preserving order.
             indexes = list(
                 dict.fromkeys(indexes)
             )
@@ -2762,20 +2855,52 @@ class EntityResolver:
             if len(indexes) < 2:
                 continue
 
-            # A row should never belong to two independent merge groups
-            # during the same resolution rule.
+            index_set = set(indexes)
+
+            # ----------------------------------------------------------
+            # Validate indexes
+            # ----------------------------------------------------------
+
+            invalid_indexes = (
+                    index_set
+                    - set(entities.index)
+            )
+
+            if invalid_indexes:
+                raise ValueError(
+                    "Merge group contains invalid entity row "
+                    f"index(es): {sorted(invalid_indexes)}"
+                )
+
+            # ----------------------------------------------------------
+            # Prevent overlapping independent merge groups
+            # ----------------------------------------------------------
+
             overlap = (
-                    set(indexes)
-                    & consumed_indexes
+                    index_set
+                    & claimed_indexes
             )
 
             if overlap:
                 raise ValueError(
                     "An entity was assigned to more than one "
-                    "merge group."
+                    "merge group during the same resolution rule. "
+                    f"Overlapping row index(es): "
+                    f"{sorted(overlap)}"
                 )
 
-            group = entities.loc[indexes]
+            # Claim every row in the group, including the anchor.
+            claimed_indexes.update(
+                index_set
+            )
+
+            # ----------------------------------------------------------
+            # Merge the approved group
+            # ----------------------------------------------------------
+
+            group = entities.loc[
+                indexes
+            ]
 
             merged_row = self._merge_group(
                 group
@@ -2785,13 +2910,18 @@ class EntityResolver:
             # member of the group.
             anchor_index = indexes[0]
 
-            replacements[anchor_index] = (
-                merged_row
-            )
+            replacements[
+                anchor_index
+            ] = merged_row
 
+            # Every other member disappears from the output.
             consumed_indexes.update(
                 indexes[1:]
             )
+
+        # --------------------------------------------------------------
+        # Rebuild the entity table
+        # --------------------------------------------------------------
 
         output_rows = []
 
@@ -2801,16 +2931,20 @@ class EntityResolver:
                 continue
 
             if index in replacements:
+
                 output_rows.append(
                     replacements[index]
                 )
 
             else:
+
                 output_rows.append(
                     row.to_dict()
                 )
 
-        result = pd.DataFrame(output_rows)
+        result = pd.DataFrame(
+            output_rows
+        )
 
         # Preserve the original schema and column order.
         for column in entities.columns:
@@ -2822,7 +2956,9 @@ class EntityResolver:
             entities.columns
         ]
 
-        return result.reset_index(drop=True)
+        return result.reset_index(
+            drop=True
+        )
 
     # ----------------------------------------------------------
     # Matching Transformations
