@@ -101,6 +101,10 @@ class EntityResolver:
             r"\bBANK\b": ("Bank", "High"),
             r"\bCREDIT UNION\b": ("Financial Institution", "High"),
             r"\bMORTGAGE\b": ("Financial Institution", "Medium"),
+            r"^FBO\b.*\bIRA\b$": (
+                "Retirement Account",
+                "High"
+            ),
 
             # ----------------------------------------------------------
             # Religious organizations
@@ -197,6 +201,11 @@ class EntityResolver:
             r"\bREVITALIZATION\b": ("Other Organization", "Medium"),
 
             r"\bRESTAURANT\b": ("Other Organization", "Medium"),
+
+            r"\bMGT\s+SERV\b": (
+                "Other Organization",
+                "Medium"
+            ),
 
             # ----------------------------------------------------------
             # Trusts and estates
