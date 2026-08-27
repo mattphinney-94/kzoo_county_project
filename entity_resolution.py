@@ -682,6 +682,45 @@ class EntityResolver:
             return False
 
         # ----------------------------------------------------------
+        # Reject ambiguous comma structures
+        # ----------------------------------------------------------
+
+        suffixes = {
+            "JR",
+            "JUNIOR",
+            "SR",
+            "SENIOR",
+            "II",
+            "III",
+            "IV"
+        }
+
+        comma_parts = [
+            part.strip()
+            for part in name.split(",")
+            if part.strip()
+        ]
+
+        # A normal comma-formatted person generally has:
+        #
+        #     LAST, FIRST MIDDLE
+        #
+        # A third comma-separated component is allowed only when
+        # it is a recognized generational suffix:
+        #
+        #     LAST, FIRST MIDDLE, JR
+        #
+        # Other multi-comma structures are too ambiguous to
+        # classify confidently as one individual.
+        if len(comma_parts) > 2:
+
+            if (
+                    len(comma_parts) != 3
+                    or comma_parts[-1] not in suffixes
+            ):
+                return False
+
+        # ----------------------------------------------------------
         # Clean punctuation used in otherwise normal person names
         # ----------------------------------------------------------
 
@@ -701,16 +740,6 @@ class EntityResolver:
         # ----------------------------------------------------------
         # Remove a terminal generational suffix
         # ----------------------------------------------------------
-
-        suffixes = {
-            "JR",
-            "JUNIOR",
-            "SR",
-            "SENIOR",
-            "II",
-            "III",
-            "IV"
-        }
 
         if tokens[-1] in suffixes:
             tokens = tokens[:-1]
