@@ -59,6 +59,38 @@ class EntityResolver:
 
         }
 
+        self.same_parcel_association_rules = {
+            ("Owner", "Taxpayer"): {
+                "strength": "High",
+                "rule": "SAME_PARCEL_ORG_OWNER_PERSON_TAXPAYER"
+            },
+
+            ("Owner", "Owner"): {
+                "strength": "High",
+                "rule": "SAME_PARCEL_CO_OWNER"
+            },
+
+            ("Taxpayer", "Owner"): {
+                "strength": "High",
+                "rule": "SAME_PARCEL_ORG_TAXPAYER_PERSON_OWNER"
+            },
+
+            ("Owner", "Tax Send To"): {
+                "strength": "Medium",
+                "rule": "SAME_PARCEL_ORG_OWNER_PERSON_TAX_SEND_TO"
+            },
+
+            ("Tax Send To", "Owner"): {
+                "strength": "Medium",
+                "rule": "SAME_PARCEL_ORG_TAX_SEND_TO_PERSON_OWNER"
+            },
+
+            ("Owner", "Owner Care Of"): {
+                "strength": "Low",
+                "rule": "SAME_PARCEL_ORG_OWNER_PERSON_OWNER_CARE_OF"
+            }
+        }
+
         self.address_source_mapping = {
 
             "Owner": "owner_address",
@@ -202,10 +234,9 @@ class EntityResolver:
 
             r"\bRESTAURANT\b": ("Other Organization", "Medium"),
 
-            r"\bMGT\s+SERV\b": (
-                "Other Organization",
-                "Medium"
-            ),
+            r"\bMILLWORK\b": ("Other Organization", "Medium"),
+
+            r"\bMGT\s+SERV\b": ("Other Organization", "Medium"),
 
             # ----------------------------------------------------------
             # Trusts and estates
@@ -303,8 +334,15 @@ class EntityResolver:
             )
         )
 
+        association_evidence = (
+            self._create_association_evidence(
+                entity_occurrences,
+                entities,
+                parcel_entity_roles
+            )
+        )
+
         # Later stages
-        association_evidence = pd.DataFrame()
         entity_associations = pd.DataFrame()
 
         return (
@@ -799,6 +837,36 @@ class EntityResolver:
 
         if not name:
             return False
+
+        # ----------------------------------------------------------
+        # Repeated-surname comma structure
+        #
+        # Examples:
+        #
+        # DARDEN MURPHY JR, DARDEN VICENT B
+        # DARDEN RICKIE L, DARDEN VANASSA A
+        #
+        # These represent multiple parties even though the source
+        # uses a comma rather than an explicit joint-owner marker.
+        # ----------------------------------------------------------
+
+        comma_parts = [
+            part.strip()
+            for part in name.split(",")
+            if part.strip()
+        ]
+
+        if len(comma_parts) == 2:
+
+            left_tokens = comma_parts[0].split()
+            right_tokens = comma_parts[1].split()
+
+            if (
+                    len(left_tokens) >= 2
+                    and len(right_tokens) >= 2
+                    and left_tokens[0] == right_tokens[0]
+            ):
+                return True
 
         if "&" in name:
             return True
@@ -3888,13 +3956,612 @@ class EntityResolver:
     # Association Evidence
     ############################################################
 
-    def _create_association_evidence(self,
-                                     entity_occurrences,
-                                     entities):
-        raise NotImplementedError
+    # ----------------------------------------------------------
+    # Orchestration
+    # ----------------------------------------------------------
+
+    def _create_association_evidence(
+            self,
+            entity_occurrences,
+            entities,
+            parcel_entity_roles
+    ):
+        """
+        Create explainable evidence supporting associations
+        between resolved entities.
+
+        Evidence records observations and confidence in an
+        association. It does not assert legal ownership.
+        """
+
+        evidence_tables = []
+
+        # ----------------------------------------------------------
+        # Same-parcel Person-Organization evidence
+        # ----------------------------------------------------------
+
+        same_parcel_evidence = (
+            self._create_same_parcel_org_person_evidence(
+                parcel_entity_roles,
+                entities
+            )
+        )
+
+        if not same_parcel_evidence.empty:
+            evidence_tables.append(
+                same_parcel_evidence
+            )
+
+        # ----------------------------------------------------------
+        # Cross-parcel shared-owner-address evidence
+        # ----------------------------------------------------------
+
+        shared_owner_address_evidence = (
+            self._create_shared_owner_address_evidence(
+                entity_occurrences,
+                entities
+            )
+        )
+
+        if not shared_owner_address_evidence.empty:
+            evidence_tables.append(
+                shared_owner_address_evidence
+            )
+
+        # ----------------------------------------------------------
+        # Future rules
+        #
+        # - shared taxpayer address
+        # - other audited evidence sources
+        # ----------------------------------------------------------
+
+        # ----------------------------------------------------------
+        # No evidence
+        # ----------------------------------------------------------
+
+        if not evidence_tables:
+            association_evidence = (
+                self._empty_association_evidence()
+            )
+
+            association_evidence.insert(
+                0,
+                "evidence_id",
+                pd.Series(dtype="int64")
+            )
+
+            return association_evidence
+
+        # ----------------------------------------------------------
+        # Combine evidence from all rules
+        # ----------------------------------------------------------
+
+        association_evidence = (
+            pd.concat(
+                evidence_tables,
+                ignore_index=True
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Assign stable evidence IDs for this build
+        # ----------------------------------------------------------
+
+        association_evidence.insert(
+            0,
+            "evidence_id",
+            range(
+                1,
+                len(association_evidence) + 1
+            )
+        )
+
+        return association_evidence
+
+    def _empty_association_evidence(self):
+        """
+        Return an empty association-evidence table with the
+        standard Stage 5 schema.
+        """
+
+        return pd.DataFrame(
+            columns=[
+                "entity_id_a",
+                "entity_id_b",
+                "evidence_rule",
+                "evidence_strength",
+                "parcel_number_a",
+                "parcel_number_b",
+                "role_a",
+                "role_b",
+                "shared_address",
+                "address_type"
+            ]
+        )
+
+    # ----------------------------------------------------------
+    # Evidence generators
+    # ----------------------------------------------------------
+
+    def _create_same_parcel_org_person_evidence(
+            self,
+            parcel_entity_roles,
+            entities
+    ):
+        """
+        Create audited same-parcel association evidence
+        between Person and Organization entities.
+
+        Each output row represents one distinct:
+
+            parcel
+            person
+            organization
+            person role
+            organization role
+
+        relationship that matches an approved evidence rule.
+        """
+
+        entity_lookup = (
+            entities[
+                [
+                    "entity_id",
+                    "entity_type"
+                ]
+            ]
+            .copy()
+        )
+
+        roles = (
+            parcel_entity_roles
+            .merge(
+                entity_lookup,
+                on="entity_id",
+                how="left",
+                validate="many_to_one"
+            )
+        )
+
+        if roles["entity_type"].isna().any():
+            raise ValueError(
+                "Some parcel entity roles could not be "
+                "matched to an entity."
+            )
+
+        # ----------------------------------------------------------
+        # Separate Person and Organization parcel roles
+        # ----------------------------------------------------------
+
+        person_roles = (
+            roles[
+                roles["entity_type"]
+                == "Person"
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "role"
+                ]
+            ]
+            .rename(
+                columns={
+                    "entity_id":
+                        "person_id",
+                    "role":
+                        "person_role"
+                }
+            )
+        )
+
+        organization_roles = (
+            roles[
+                roles["entity_type"]
+                == "Organization"
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "role"
+                ]
+            ]
+            .rename(
+                columns={
+                    "entity_id":
+                        "organization_id",
+                    "role":
+                        "organization_role"
+                }
+            )
+        )
+
+        # Every Person role is paired with every Organization
+        # role occurring on the same parcel.
+        candidates = (
+            organization_roles
+            .merge(
+                person_roles,
+                on="parcel_number",
+                how="inner"
+            )
+        )
+
+        if candidates.empty:
+            return pd.DataFrame(
+                columns=[
+                    "entity_id_a",
+                    "entity_id_b",
+                    "evidence_rule",
+                    "evidence_strength",
+                    "parcel_number_a",
+                    "parcel_number_b",
+                    "role_a",
+                    "role_b",
+                    "shared_address",
+                    "address_type"
+                ]
+            )
+
+        evidence_rows = []
+
+        for _, row in candidates.iterrows():
+
+            rule_key = (
+                row["organization_role"],
+                row["person_role"]
+            )
+
+            rule_info = (
+                self.same_parcel_association_rules
+                .get(rule_key)
+            )
+
+            # Unapproved role combinations are not evidence.
+            if rule_info is None:
+                continue
+
+            entity_id_a = min(
+                row["organization_id"],
+                row["person_id"]
+            )
+
+            entity_id_b = max(
+                row["organization_id"],
+                row["person_id"]
+            )
+
+            evidence_rows.append({
+                "entity_id_a":
+                    entity_id_a,
+
+                "entity_id_b":
+                    entity_id_b,
+
+                "evidence_rule":
+                    rule_info["rule"],
+
+                "evidence_strength":
+                    rule_info["strength"],
+
+                "parcel_number_a":
+                    row["parcel_number"],
+
+                "parcel_number_b":
+                    row["parcel_number"],
+
+                # These roles correspond to entity_id_a / entity_id_b,
+                # so preserve direction after normalizing IDs.
+                "role_a":
+                    (
+                        row["organization_role"]
+                        if entity_id_a
+                           == row["organization_id"]
+                        else row["person_role"]
+                    ),
+
+                "role_b":
+                    (
+                        row["organization_role"]
+                        if entity_id_b
+                           == row["organization_id"]
+                        else row["person_role"]
+                    ),
+
+                "shared_address":
+                    None,
+
+                "address_type":
+                    None
+            })
+
+        evidence = pd.DataFrame(
+            evidence_rows
+        )
+
+        if evidence.empty:
+            return pd.DataFrame(
+                columns=[
+                    "entity_id_a",
+                    "entity_id_b",
+                    "evidence_rule",
+                    "evidence_strength",
+                    "parcel_number_a",
+                    "parcel_number_b",
+                    "role_a",
+                    "role_b",
+                    "shared_address",
+                    "address_type"
+                ]
+            )
+
+        evidence = (
+            evidence
+            .drop_duplicates()
+            .sort_values(
+                [
+                    "entity_id_a",
+                    "entity_id_b",
+                    "parcel_number_a",
+                    "evidence_rule"
+                ],
+                kind="stable"
+            )
+            .reset_index(drop=True)
+        )
+
+        return evidence
+
+    def _create_shared_owner_address_evidence(
+            self,
+            entity_occurrences,
+            entities
+    ):
+        """
+        Create cross-parcel Person-Organization association evidence
+        from a shared owner address.
+
+        Grain
+        -----
+        One row per unique:
+            Person entity
+            Organization entity
+            shared owner address
+
+        Multiple parcels using the same address do not create
+        additional independent evidence records.
+
+        Notes
+        -----
+        This rule indicates evidence of an association only.
+        It does not establish that the Person owns or controls
+        the Organization.
+        """
+
+        # ----------------------------------------------------------
+        # Owner occurrences with usable addresses
+        # ----------------------------------------------------------
+
+        owner_occurrences = (
+            entity_occurrences[
+                (
+                        entity_occurrences["role"]
+                        == "Owner"
+                )
+                &
+                (
+                    entity_occurrences[
+                        "associated_address"
+                    ].notna()
+                )
+                &
+                (
+                        entity_occurrences[
+                            "associated_address"
+                        ].str.strip()
+                        != ""
+                )
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "associated_address"
+                ]
+            ]
+            .drop_duplicates()
+            .rename(
+                columns={
+                    "associated_address":
+                        "shared_address"
+                }
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Attach broad entity type
+        # ----------------------------------------------------------
+
+        owner_entities = (
+            owner_occurrences
+            .merge(
+                entities[
+                    [
+                        "entity_id",
+                        "entity_type"
+                    ]
+                ],
+                on="entity_id",
+                how="left",
+                validate="many_to_one"
+            )
+        )
+
+        if owner_entities["entity_type"].isna().any():
+            raise ValueError(
+                "Some owner occurrences could not be matched "
+                "to an entity."
+            )
+
+        # ----------------------------------------------------------
+        # Separate Person and Organization owners
+        # ----------------------------------------------------------
+
+        persons = (
+            owner_entities[
+                owner_entities["entity_type"]
+                == "Person"
+                ]
+            .rename(
+                columns={
+                    "entity_id":
+                        "person_id"
+                }
+            )
+        )
+
+        organizations = (
+            owner_entities[
+                owner_entities["entity_type"]
+                == "Organization"
+                ]
+            .rename(
+                columns={
+                    "entity_id":
+                        "organization_id"
+                }
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Candidate Person-Organization pairs using the same
+        # owner address
+        # ----------------------------------------------------------
+
+        candidates = (
+            organizations
+            .merge(
+                persons,
+                on="shared_address",
+                how="inner",
+                suffixes=(
+                    "_organization",
+                    "_person"
+                )
+            )
+        )
+
+        # ----------------------------------------------------------
+        # The rule is specifically cross-parcel.
+        #
+        # If both entities occur only on the same parcel in this
+        # particular joined row, that row does not support the
+        # shared-owner-address rule.
+        # ----------------------------------------------------------
+
+        candidates = (
+            candidates[
+                candidates[
+                    "parcel_number_organization"
+                ]
+                !=
+                candidates[
+                    "parcel_number_person"
+                ]
+                ]
+            .copy()
+        )
+
+        if candidates.empty:
+            return self._empty_association_evidence()
+
+        # ----------------------------------------------------------
+        # Collapse parcel cross-products.
+        #
+        # The shared address is the evidence event. A Person with
+        # two parcels and an Organization with five parcels should
+        # produce one evidence record for this address, not ten.
+        # ----------------------------------------------------------
+
+        candidates = (
+            candidates[
+                [
+                    "person_id",
+                    "organization_id",
+                    "shared_address"
+                ]
+            ]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
+        evidence_rows = []
+
+        for _, row in candidates.iterrows():
+            entity_id_a = min(
+                row["person_id"],
+                row["organization_id"]
+            )
+
+            entity_id_b = max(
+                row["person_id"],
+                row["organization_id"]
+            )
+
+            evidence_rows.append({
+                "entity_id_a":
+                    entity_id_a,
+
+                "entity_id_b":
+                    entity_id_b,
+
+                "evidence_rule":
+                    "SHARED_OWNER_ADDRESS",
+
+                "evidence_strength":
+                    "Medium",
+
+                # No individual parcel pair is the evidence event.
+                "parcel_number_a":
+                    None,
+
+                "parcel_number_b":
+                    None,
+
+                # Both entities appear as owners in the source
+                # records supplying this address evidence.
+                "role_a":
+                    "Owner",
+
+                "role_b":
+                    "Owner",
+
+                "shared_address":
+                    row["shared_address"],
+
+                "address_type":
+                    "Owner"
+            })
+
+        evidence = (
+            pd.DataFrame(evidence_rows)
+            .drop_duplicates()
+            .sort_values(
+                [
+                    "entity_id_a",
+                    "entity_id_b",
+                    "shared_address"
+                ],
+                kind="stable"
+            )
+            .reset_index(drop=True)
+        )
+
+        return evidence
 
     ############################################################
-    # Stage 5
+    # Stage 6
     # Final Entity Associations
     ############################################################
 
