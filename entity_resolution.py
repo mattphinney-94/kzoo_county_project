@@ -373,6 +373,12 @@ class EntityResolver:
             clean_df
         )
 
+        entity_occurrences = (
+            self._apply_owner_line_continuations(
+                entity_occurrences
+            )
+        )
+
         # Classify the original source occurrences.
         entity_occurrences = self._classify_entity_type(
             entity_occurrences
@@ -457,6 +463,355 @@ class EntityResolver:
         entity_occurrences["source_occurrence_id"] = (
                 entity_occurrences.index + 1
         )
+
+        return entity_occurrences
+
+    def _apply_owner_line_continuations(
+            self,
+            entity_occurrences
+    ):
+        """
+        Apply audited corrections for owner names that were split
+        across owner_name and owner_name_2 in the source data.
+
+        Some source records use owner_name_2 as a continuation of
+        owner_name rather than as a separate owner. These cases must
+        be corrected before entity classification so that one logical
+        owner is not incorrectly represented as two entities.
+
+        The correction changes only the working entity_name used by
+        entity resolution. Source lineage is preserved:
+
+            source_entity_name
+            source_column
+            source_occurrence_id
+
+        Both original source occurrences remain in the occurrence
+        table and are assigned the same combined entity_name.
+
+        Only explicitly audited cases are corrected here. No general
+        inference is made from owner_name / owner_name_2 formatting.
+        """
+
+        entity_occurrences = entity_occurrences.copy()
+
+        if entity_occurrences.empty:
+            return entity_occurrences
+
+        # ----------------------------------------------------------
+        # Audited owner-line continuation overrides
+        #
+        # Each rule identifies:
+        #   - the parcel
+        #   - the exact owner_name source value
+        #   - the exact owner_name_2 source value
+        #   - the complete logical entity name
+        #
+        # Exact source-value matching is intentional. These rules
+        # should not silently generalize to unaudited records.
+        # ----------------------------------------------------------
+
+        continuation_overrides = [
+            {
+                "parcel_number":
+                    "06-16-349-005",
+
+                "owner_name":
+                    "APPLEGATE, NEIL E & SHARON K",
+
+                "owner_name_2":
+                    "REVOCABLE TRUST",
+
+                "combined_name":
+                    "APPLEGATE, NEIL E & SHARON K REVOCABLE TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "06-35-147-001",
+
+                "owner_name":
+                    "DECKER, LYDIA",
+
+                "owner_name_2":
+                    "LIVING TRUST",
+
+                "combined_name":
+                    "DECKER, LYDIA LIVING TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "06-35-263-182",
+
+                "owner_name":
+                    "DECKER, LYDIA",
+
+                "owner_name_2":
+                    "LIVING TRUST",
+
+                "combined_name":
+                    "DECKER, LYDIA LIVING TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "06-29-437-025",
+
+                "owner_name":
+                    "ELIZABETH A SCHUBERT RECOVERABLE",
+
+                "owner_name_2":
+                    "LIVING TRUST",
+
+                "combined_name":
+                    "ELIZABETH A SCHUBERT RECOVERABLE LIVING TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "06-01-205-031",
+
+                "owner_name":
+                    "KALAMAZOO EAST CONGREGATION OF",
+
+                "owner_name_2":
+                    "JEHOVAH'S WITNESS",
+
+                "combined_name":
+                    "KALAMAZOO EAST CONGREGATION OF JEHOVAH'S WITNESS"
+            },
+
+            {
+                "parcel_number":
+                    "06-35-175-472",
+
+                "owner_name":
+                    "LAGO, JANE M TTEE OF",
+
+                "owner_name_2":
+                    "JANE M LAGO REVOCABLE TRUST",
+
+                "combined_name":
+                    "LAGO, JANE M TTEE OF JANE M LAGO REVOCABLE TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "06-14-150-003",
+
+                "owner_name":
+                    "MCKINLEY, DEON",
+
+                "owner_name_2":
+                    "MVP AUTO SALES",
+
+                "combined_name":
+                    "MCKINLEY, DEON MVP AUTO SALES"
+            },
+
+            {
+                "parcel_number":
+                    "01-35-170-220",
+
+                "owner_name":
+                    "NIEWOONDER ED & KAY",
+
+                "owner_name_2":
+                    "TRUST",
+
+                "combined_name":
+                    "NIEWOONDER ED & KAY TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "07-05-240-140",
+
+                "owner_name":
+                    "STAUFFER JENNIFER",
+
+                "owner_name_2":
+                    "TRUSTEE OF THE BELL FAMILY TRUST",
+
+                "combined_name":
+                    "STAUFFER JENNIFER TRUSTEE OF THE BELL FAMILY TRUST"
+            },
+
+            {
+                "parcel_number":
+                    "07-14-130-012",
+
+                "owner_name":
+                    "WILLIAMS BRIAN R (DECEASED)",
+
+                "owner_name_2":
+                    "ESTATE OF",
+
+                "combined_name":
+                    "ESTATE OF WILLIAMS BRIAN R (DECEASED)"
+            }
+        ]
+
+        # ----------------------------------------------------------
+        # Audit metadata
+        # ----------------------------------------------------------
+
+        if (
+                "owner_line_continuation_applied"
+                not in entity_occurrences.columns
+        ):
+            entity_occurrences[
+                "owner_line_continuation_applied"
+            ] = False
+
+        if (
+                "owner_line_continuation_rule"
+                not in entity_occurrences.columns
+        ):
+            entity_occurrences[
+                "owner_line_continuation_rule"
+            ] = ""
+
+        # ----------------------------------------------------------
+        # Apply each audited correction
+        # ----------------------------------------------------------
+
+        for override in continuation_overrides:
+
+            parcel_number = (
+                override["parcel_number"]
+            )
+
+            owner_name = (
+                override["owner_name"]
+            )
+
+            owner_name_2 = (
+                override["owner_name_2"]
+            )
+
+            combined_name = (
+                override["combined_name"]
+            )
+
+            owner_name_mask = (
+                    (
+                            entity_occurrences[
+                                "parcel_number"
+                            ]
+                            == parcel_number
+                    )
+                    &
+                    (
+                            entity_occurrences[
+                                "source_column"
+                            ]
+                            == "owner_name"
+                    )
+                    &
+                    (
+                            entity_occurrences[
+                                "source_entity_name"
+                            ]
+                            == owner_name
+                    )
+            )
+
+            owner_name_2_mask = (
+                    (
+                            entity_occurrences[
+                                "parcel_number"
+                            ]
+                            == parcel_number
+                    )
+                    &
+                    (
+                            entity_occurrences[
+                                "source_column"
+                            ]
+                            == "owner_name_2"
+                    )
+                    &
+                    (
+                            entity_occurrences[
+                                "source_entity_name"
+                            ]
+                            == owner_name_2
+                    )
+            )
+
+            owner_name_count = (
+                owner_name_mask.sum()
+            )
+
+            owner_name_2_count = (
+                owner_name_2_mask.sum()
+            )
+
+            # ------------------------------------------------------
+            # Allow an override to be absent entirely.
+            #
+            # This makes the method safe if a future source dataset
+            # no longer contains one of the audited parcels.
+            # ------------------------------------------------------
+
+            if (
+                    owner_name_count == 0
+                    and
+                    owner_name_2_count == 0
+            ):
+                continue
+
+            # ------------------------------------------------------
+            # If only one side exists, or either side occurs more
+            # than once, stop rather than applying an ambiguous
+            # correction.
+            # ------------------------------------------------------
+
+            if (
+                    owner_name_count != 1
+                    or
+                    owner_name_2_count != 1
+            ):
+                raise ValueError(
+                    "Owner-line continuation override did not "
+                    "match exactly one owner_name and one "
+                    "owner_name_2 occurrence for parcel "
+                    f"{parcel_number}. "
+                    f"owner_name matches: {owner_name_count}; "
+                    f"owner_name_2 matches: "
+                    f"{owner_name_2_count}."
+                )
+
+            continuation_mask = (
+                    owner_name_mask
+                    |
+                    owner_name_2_mask
+            )
+
+            # ------------------------------------------------------
+            # Replace only the working entity representation.
+            #
+            # source_entity_name remains unchanged.
+            # ------------------------------------------------------
+
+            entity_occurrences.loc[
+                continuation_mask,
+                "entity_name"
+            ] = combined_name
+
+            entity_occurrences.loc[
+                continuation_mask,
+                "owner_line_continuation_applied"
+            ] = True
+
+            entity_occurrences.loc[
+                continuation_mask,
+                "owner_line_continuation_rule"
+            ] = (
+                "AUDITED_OWNER_NAME_CONTINUATION"
+            )
 
         return entity_occurrences
 
