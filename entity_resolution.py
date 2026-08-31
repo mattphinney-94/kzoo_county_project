@@ -336,6 +336,7 @@ class EntityResolver:
 
         association_evidence = (
             self._create_association_evidence(
+                clean_df,
                 entity_occurrences,
                 entities,
                 parcel_entity_roles
@@ -3962,6 +3963,7 @@ class EntityResolver:
 
     def _create_association_evidence(
             self,
+            clean_df,
             entity_occurrences,
             entities,
             parcel_entity_roles
@@ -4009,11 +4011,21 @@ class EntityResolver:
             )
 
         # ----------------------------------------------------------
-        # Future rules
-        #
-        # - shared taxpayer address
-        # - other audited evidence sources
+        # Cross-parcel shared-taxpayer-address evidence
         # ----------------------------------------------------------
+
+        shared_taxpayer_address_evidence = (
+            self._create_shared_taxpayer_address_evidence(
+                clean_df,
+                parcel_entity_roles,
+                entities
+            )
+        )
+
+        if not shared_taxpayer_address_evidence.empty:
+            evidence_tables.append(
+                shared_taxpayer_address_evidence
+            )
 
         # ----------------------------------------------------------
         # No evidence
@@ -4546,6 +4558,327 @@ class EntityResolver:
 
         evidence = (
             pd.DataFrame(evidence_rows)
+            .drop_duplicates()
+            .sort_values(
+                [
+                    "entity_id_a",
+                    "entity_id_b",
+                    "shared_address"
+                ],
+                kind="stable"
+            )
+            .reset_index(drop=True)
+        )
+
+        return evidence
+
+    def _create_shared_taxpayer_address_evidence(
+            self,
+            clean_df,
+            parcel_entity_roles,
+            entities
+    ):
+        """
+        Create cross-parcel Person-Organization association evidence
+        from a shared taxpayer address.
+
+        Grain
+        -----
+        One row per unique:
+            Person entity
+            Organization entity
+            shared taxpayer address
+
+        Both entities must be Owners of different parcels whose
+        taxpayer addresses match.
+
+        Multiple parcels using the same taxpayer address do not
+        create additional independent evidence records.
+
+        Notes
+        -----
+        This rule indicates evidence of an association only.
+        It does not establish that the Person owns or controls
+        the Organization.
+        """
+
+        # ----------------------------------------------------------
+        # Build one taxpayer-address record per parcel
+        # ----------------------------------------------------------
+
+        parcel_taxpayer_addresses = (
+            clean_df[
+                [
+                    "parcel_number",
+                    "taxpayer_address"
+                ]
+            ]
+            .copy()
+        )
+
+        parcel_taxpayer_addresses = (
+            parcel_taxpayer_addresses[
+                (
+                    parcel_taxpayer_addresses[
+                        "taxpayer_address"
+                    ].notna()
+                )
+                &
+                (
+                        parcel_taxpayer_addresses[
+                            "taxpayer_address"
+                        ].str.strip()
+                        != ""
+                )
+                ]
+            .drop_duplicates()
+        )
+
+        # ----------------------------------------------------------
+        # Validate parcel -> taxpayer address relationship
+        # ----------------------------------------------------------
+
+        taxpayer_address_counts = (
+            parcel_taxpayer_addresses
+            .groupby(
+                "parcel_number"
+            )[
+                "taxpayer_address"
+            ]
+            .nunique()
+        )
+
+        if (
+                taxpayer_address_counts > 1
+        ).any():
+            raise ValueError(
+                "At least one parcel has multiple taxpayer "
+                "addresses."
+            )
+
+        # ----------------------------------------------------------
+        # Get resolved Owner entities by parcel
+        # ----------------------------------------------------------
+
+        owner_entities = (
+            parcel_entity_roles[
+                parcel_entity_roles[
+                    "role"
+                ] == "Owner"
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id"
+                ]
+            ]
+            .drop_duplicates()
+        )
+
+        # ----------------------------------------------------------
+        # Attach each parcel's taxpayer address
+        # ----------------------------------------------------------
+
+        owner_entities = (
+            owner_entities
+            .merge(
+                parcel_taxpayer_addresses,
+                on="parcel_number",
+                how="inner",
+                validate="many_to_one"
+            )
+            .rename(
+                columns={
+                    "taxpayer_address":
+                        "shared_address"
+                }
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Attach entity type
+        # ----------------------------------------------------------
+
+        owner_entities = (
+            owner_entities
+            .merge(
+                entities[
+                    [
+                        "entity_id",
+                        "entity_type"
+                    ]
+                ],
+                on="entity_id",
+                how="left",
+                validate="many_to_one"
+            )
+        )
+
+        if owner_entities[
+            "entity_type"
+        ].isna().any():
+            raise ValueError(
+                "Some owner relationships could not be "
+                "matched to an entity."
+            )
+
+        # ----------------------------------------------------------
+        # Separate Person and Organization owners
+        # ----------------------------------------------------------
+
+        persons = (
+            owner_entities[
+                owner_entities[
+                    "entity_type"
+                ] == "Person"
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "shared_address"
+                ]
+            ]
+            .rename(
+                columns={
+                    "parcel_number":
+                        "person_parcel",
+                    "entity_id":
+                        "person_id"
+                }
+            )
+        )
+
+        organizations = (
+            owner_entities[
+                owner_entities[
+                    "entity_type"
+                ] == "Organization"
+                ]
+            [
+                [
+                    "parcel_number",
+                    "entity_id",
+                    "shared_address"
+                ]
+            ]
+            .rename(
+                columns={
+                    "parcel_number":
+                        "organization_parcel",
+                    "entity_id":
+                        "organization_id"
+                }
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Find Person-Organization owners sharing a taxpayer
+        # address.
+        # ----------------------------------------------------------
+
+        candidates = (
+            organizations
+            .merge(
+                persons,
+                on="shared_address",
+                how="inner"
+            )
+        )
+
+        # ----------------------------------------------------------
+        # This rule is specifically cross-parcel.
+        # ----------------------------------------------------------
+
+        candidates = (
+            candidates[
+                candidates[
+                    "organization_parcel"
+                ]
+                !=
+                candidates[
+                    "person_parcel"
+                ]
+                ]
+            .copy()
+        )
+
+        if candidates.empty:
+            return self._empty_association_evidence()
+
+        # ----------------------------------------------------------
+        # Collapse parcel cross-products.
+        #
+        # The evidence event is the shared taxpayer address,
+        # not every possible combination of parcels.
+        # ----------------------------------------------------------
+
+        candidates = (
+            candidates[
+                [
+                    "person_id",
+                    "organization_id",
+                    "shared_address"
+                ]
+            ]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
+        evidence_rows = []
+
+        for _, row in candidates.iterrows():
+            entity_id_a = min(
+                row["person_id"],
+                row["organization_id"]
+            )
+
+            entity_id_b = max(
+                row["person_id"],
+                row["organization_id"]
+            )
+
+            evidence_rows.append({
+                "entity_id_a":
+                    entity_id_a,
+
+                "entity_id_b":
+                    entity_id_b,
+
+                "evidence_rule":
+                    "SHARED_TAXPAYER_ADDRESS",
+
+                "evidence_strength":
+                    "Medium",
+
+                # No individual parcel pair represents
+                # the evidence event.
+                "parcel_number_a":
+                    None,
+
+                "parcel_number_b":
+                    None,
+
+                # The associated entities are Owners.
+                # "Taxpayer" describes the address type,
+                # not their parcel role.
+                "role_a":
+                    "Owner",
+
+                "role_b":
+                    "Owner",
+
+                "shared_address":
+                    row["shared_address"],
+
+                "address_type":
+                    "Taxpayer"
+            })
+
+        evidence = (
+            pd.DataFrame(
+                evidence_rows
+            )
             .drop_duplicates()
             .sort_values(
                 [
