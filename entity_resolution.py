@@ -133,10 +133,7 @@ class EntityResolver:
             r"\bBANK\b": ("Bank", "High"),
             r"\bCREDIT UNION\b": ("Financial Institution", "High"),
             r"\bMORTGAGE\b": ("Financial Institution", "Medium"),
-            r"^FBO\b.*\bIRA\b$": (
-                "Retirement Account",
-                "High"
-            ),
+            r"^FBO\b.*\bIRA\b$": ("Retirement Account", "High"),
 
             # ----------------------------------------------------------
             # Religious organizations
@@ -152,6 +149,8 @@ class EntityResolver:
             r"\bCHAPEL\b": ("Religious Organization", "Medium"),
             r"\bTEMPLE\b": ("Religious Organization", "Medium"),
 
+            r"\bJEHOVAH'?S\s+WITNESS(?:ES)?\b": ("Religious Organization", "Medium"),
+
             # ----------------------------------------------------------
             # Government
             # ----------------------------------------------------------
@@ -165,6 +164,8 @@ class EntityResolver:
             r"\bDEPT\b": ("Government", "Medium"),
 
             r"\bAUTHORITY\b": ("Government", "Medium"),
+
+            r"\bSECRETARY\s+OF\s+HUD\b": ("Government", "Medium"),
 
             # ----------------------------------------------------------
             # Educational organizations
@@ -220,6 +221,8 @@ class EntityResolver:
 
             r"\bCOMPANY\b": ("Other Organization", "Medium"),
             r"\bCO\b": ("Other Organization", "Low"),
+
+            r"\bINDUSTRIES\b": ("Other Organization", "Medium"),
 
             r"\bSALES\b": ("Other Organization", "Medium"),
 
