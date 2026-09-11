@@ -329,7 +329,8 @@ class EntityResolver:
             .astype(int)
         )
 
-        # Create the parcel_entity_roles dataframe
+        # Stage 4
+        # Create the parcel_entity_roles dataframe.
         parcel_entity_roles = (
             self._create_parcel_entity_roles(
                 entity_occurrences,
@@ -337,6 +338,8 @@ class EntityResolver:
             )
         )
 
+        # Stage 5
+        # Create the association_evidence dataframe.
         association_evidence = (
             self._create_association_evidence(
                 clean_df,
@@ -346,8 +349,13 @@ class EntityResolver:
             )
         )
 
-        # Later stages
-        entity_associations = pd.DataFrame()
+        # Stage 6
+        # Create the entity_associations dataframe.
+        entity_associations = (
+            self._create_entity_associations(
+                association_evidence
+            )
+        )
 
         return (
             entity_occurrences,
@@ -5255,7 +5263,283 @@ class EntityResolver:
     # Stage 6
     # Final Entity Associations
     ############################################################
+    def _empty_entity_associations(self):
+        """
+        Return an empty Stage 6 entity-association table
+        with the expected schema.
+        """
 
-    def _create_entity_associations(self,
-                                    association_evidence):
-        raise NotImplementedError
+        return pd.DataFrame(
+            columns=[
+                "association_id",
+                "entity_id_a",
+                "entity_id_b",
+                "association_confidence",
+                "evidence_count",
+                "evidence_rule_count"
+            ]
+        )
+
+    def _create_entity_associations(
+            self,
+            association_evidence
+    ):
+        """
+        Aggregate Stage 5 evidence into one association record
+        per normalized entity pair.
+
+        Grain
+        -----
+        One row per:
+            entity_id_a
+            entity_id_b
+
+        Confidence
+        ----------
+        Association confidence is determined by the strongest
+        individual evidence record supporting the pair:
+
+            High   > Medium > Low
+
+        Multiple weaker evidence records do not automatically
+        promote an association to a higher confidence level.
+
+        The complete underlying explanation remains available
+        in association_evidence.
+        """
+
+        if association_evidence.empty:
+            return self._empty_entity_associations()
+
+        evidence = association_evidence.copy()
+
+        # ----------------------------------------------------------
+        # Validate required columns
+        # ----------------------------------------------------------
+
+        required_columns = {
+            "evidence_id",
+            "entity_id_a",
+            "entity_id_b",
+            "evidence_rule",
+            "evidence_strength"
+        }
+
+        missing_columns = (
+                required_columns
+                -
+                set(
+                    evidence.columns
+                )
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "Association evidence is missing required "
+                "columns: "
+                f"{sorted(missing_columns)}"
+            )
+
+        # ----------------------------------------------------------
+        # Validate evidence IDs
+        # ----------------------------------------------------------
+
+        if evidence[
+            "evidence_id"
+        ].isna().any():
+            raise ValueError(
+                "Association evidence contains missing "
+                "evidence IDs."
+            )
+
+        if not evidence[
+            "evidence_id"
+        ].is_unique:
+            raise ValueError(
+                "Association evidence contains duplicate "
+                "evidence IDs."
+            )
+
+        # ----------------------------------------------------------
+        # Validate normalized entity pairs
+        # ----------------------------------------------------------
+
+        if (
+                evidence[
+                    "entity_id_a"
+                ].isna().any()
+                or
+                evidence[
+                    "entity_id_b"
+                ].isna().any()
+        ):
+            raise ValueError(
+                "Association evidence contains missing "
+                "entity IDs."
+            )
+
+        if not (
+                evidence[
+                    "entity_id_a"
+                ]
+                <
+                evidence[
+                    "entity_id_b"
+                ]
+        ).all():
+            raise ValueError(
+                "Association evidence contains an "
+                "unnormalized or self-referencing entity pair."
+            )
+
+        # ----------------------------------------------------------
+        # Convert qualitative evidence strength to an ordinal
+        # rank used only for aggregation.
+        #
+        # These are not probabilities or numeric confidence
+        # scores.
+        # ----------------------------------------------------------
+
+        strength_rank = {
+            "Low": 1,
+            "Medium": 2,
+            "High": 3
+        }
+
+        rank_strength = {
+            value: key
+            for key, value
+            in strength_rank.items()
+        }
+
+        invalid_strengths = (
+                set(
+                    evidence[
+                        "evidence_strength"
+                    ].dropna()
+                )
+                -
+                set(
+                    strength_rank
+                )
+        )
+
+        if invalid_strengths:
+            raise ValueError(
+                "Unknown evidence strength values: "
+                f"{sorted(invalid_strengths)}"
+            )
+
+        if evidence[
+            "evidence_strength"
+        ].isna().any():
+            raise ValueError(
+                "Association evidence contains missing "
+                "evidence strength values."
+            )
+
+        evidence[
+            "_strength_rank"
+        ] = (
+            evidence[
+                "evidence_strength"
+            ]
+            .map(
+                strength_rank
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Aggregate evidence at the entity-pair grain
+        # ----------------------------------------------------------
+
+        entity_associations = (
+            evidence
+            .groupby(
+                [
+                    "entity_id_a",
+                    "entity_id_b"
+                ],
+                as_index=False
+            )
+            .agg(
+                strongest_strength_rank=(
+                    "_strength_rank",
+                    "max"
+                ),
+
+                evidence_count=(
+                    "evidence_id",
+                    "count"
+                ),
+
+                evidence_rule_count=(
+                    "evidence_rule",
+                    "nunique"
+                )
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Convert the ordinal aggregation back to the public
+        # qualitative confidence label.
+        # ----------------------------------------------------------
+
+        entity_associations[
+            "association_confidence"
+        ] = (
+            entity_associations[
+                "strongest_strength_rank"
+            ]
+            .map(
+                rank_strength
+            )
+        )
+
+        entity_associations.drop(
+            columns=[
+                "strongest_strength_rank"
+            ],
+            inplace=True
+        )
+
+        # ----------------------------------------------------------
+        # Deterministic ordering
+        # ----------------------------------------------------------
+
+        entity_associations = (
+            entity_associations[
+                [
+                    "entity_id_a",
+                    "entity_id_b",
+                    "association_confidence",
+                    "evidence_count",
+                    "evidence_rule_count"
+                ]
+            ]
+            .sort_values(
+                [
+                    "entity_id_a",
+                    "entity_id_b"
+                ],
+                kind="stable"
+            )
+            .reset_index(drop=True)
+        )
+
+        # ----------------------------------------------------------
+        # Assign deterministic association IDs
+        # ----------------------------------------------------------
+
+        entity_associations.insert(
+            0,
+            "association_id",
+            range(
+                1,
+                len(
+                    entity_associations
+                ) + 1
+            )
+        )
+
+        return entity_associations
