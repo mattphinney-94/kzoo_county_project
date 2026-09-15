@@ -294,7 +294,8 @@ class EntityResolver:
         # Stage 3
         # Resolve raw entities into consolidated entities.
         resolved_entities = self._merge_entities(
-            raw_entities
+            raw_entities,
+            entity_occurrences
         )
 
         # Finalize resolved entities and obtain the mapping between
@@ -374,11 +375,15 @@ class EntityResolver:
     # Orchestration
     # ----------------------------------------------------------
 
-    def _create_entity_occurrences(self, clean_df):
-
-        # Extract one row per non-empty source-cell occurrence.
-        entity_occurrences = self._extract_entity_occurrences(
+    def _create_entity_occurrences(
+            self,
             clean_df
+    ):
+
+        entity_occurrences = (
+            self._extract_entity_occurrences(
+                clean_df
+            )
         )
 
         entity_occurrences = (
@@ -387,33 +392,60 @@ class EntityResolver:
             )
         )
 
-        # Classify the original source occurrences.
-        entity_occurrences = self._classify_entity_type(
-            entity_occurrences
+        entity_occurrences = (
+            self._clean_dangling_ampersands(
+                entity_occurrences
+            )
         )
 
-        # Replace safely parseable Joint occurrences with their
-        # derived individual Person occurrences.
-        entity_occurrences = self._expand_joint_occurrences(
-            entity_occurrences,
-            allowed_confidences=("High", "Medium")
+        entity_occurrences = (
+            self._classify_entity_type(
+                entity_occurrences
+            )
         )
 
-        # Assign organization subtype information to the final
-        # occurrence rows.
-        entity_occurrences = self._classify_organizations(
-            entity_occurrences
+        entity_occurrences = (
+            self._expand_joint_occurrences(
+                entity_occurrences,
+                allowed_confidences=(
+                    "High",
+                    "Medium"
+                )
+            )
         )
 
-        # Add address provenance.
-        entity_occurrences = self._assign_address_source(
-            entity_occurrences
+        entity_occurrences = (
+            self._clean_routing_prefixes(
+                entity_occurrences
+            )
         )
 
-        # occurrence_id represents the post-decomposition occurrence
-        # table, so assign it last.
-        entity_occurrences = self._assign_occurrence_ids(
-            entity_occurrences
+        entity_occurrences = (
+            self._classify_organizations(
+                entity_occurrences
+            )
+        )
+
+        entity_occurrences = (
+            self._assign_address_source(
+                entity_occurrences
+            )
+        )
+
+        entity_occurrences = (
+            self._assign_occurrence_ids(
+                entity_occurrences
+            )
+        )
+
+        entity_occurrences = (
+            entity_occurrences.drop(
+                columns=[
+                    "dangling_ampersand_cleaned",
+                    "dangling_ampersand_original_name"
+                ],
+                errors="ignore"
+            )
         )
 
         return entity_occurrences
@@ -658,6 +690,32 @@ class EntityResolver:
 
                 "combined_name":
                     "ESTATE OF WILLIAMS BRIAN R (DECEASED)"
+            },
+
+            {
+                "parcel_number": "06-10-342-161",
+                "owner_name": "VALLEY VISION CONSTRUCTION",
+                "owner_name_2": "& DEVELOPMENT LLC",
+                "combined_name":
+                    "VALLEY VISION CONSTRUCTION & DEVELOPMENT LLC"
+            },
+
+            {
+                "parcel_number": "06-10-346-101",
+                "owner_name": "VALLEY VISION CONSTRUCTION",
+                "owner_name_2": "& DEVELOPMENT LLC",
+                "combined_name":
+                    "VALLEY VISION CONSTRUCTION & DEVELOPMENT LLC"
+            },
+
+            {
+                "parcel_number": "06-33-229-001",
+                "owner_name":
+                    "WEST MICHIGAN COLLEGE OF BARBERING",
+                "owner_name_2":
+                    "& BEAUTY, LLC",
+                "combined_name":
+                    "WEST MICHIGAN COLLEGE OF BARBERING & BEAUTY, LLC"
             }
         ]
 
@@ -820,6 +878,225 @@ class EntityResolver:
             ] = (
                 "AUDITED_OWNER_NAME_CONTINUATION"
             )
+
+        return entity_occurrences
+
+    def _clean_dangling_ampersands(
+            self,
+            entity_occurrences
+    ):
+        """
+        Remove standalone leading/trailing ampersands from the
+        working entity_name.
+
+        Original source values remain preserved in
+        source_entity_name.
+        """
+
+        entity_occurrences = (
+            entity_occurrences.copy()
+        )
+
+        entity_occurrences[
+            "dangling_ampersand_cleaned"
+        ] = False
+
+        entity_occurrences[
+            "dangling_ampersand_original_name"
+        ] = ""
+
+        names = (
+            entity_occurrences[
+                "entity_name"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+        # Only identify rows that actually contain a dangling
+        # leading or trailing ampersand.
+        dangling_mask = (
+                names.str.contains(
+                    r"^\s*&",
+                    regex=True
+                )
+                |
+                names.str.contains(
+                    r"&\s*$",
+                    regex=True
+                )
+        )
+
+        cleaned_names = (
+            names
+            .str.replace(
+                r"^\s*&\s*",
+                "",
+                regex=True
+            )
+            .str.replace(
+                r"\s*&\s*$",
+                "",
+                regex=True
+            )
+            .str.strip()
+        )
+
+        entity_occurrences.loc[
+            dangling_mask,
+            "dangling_ampersand_original_name"
+        ] = (
+            entity_occurrences.loc[
+                dangling_mask,
+                "entity_name"
+            ]
+        )
+
+        entity_occurrences.loc[
+            dangling_mask,
+            "entity_name"
+        ] = (
+            cleaned_names[
+                dangling_mask
+            ]
+        )
+
+        entity_occurrences.loc[
+            dangling_mask,
+            "dangling_ampersand_cleaned"
+        ] = True
+
+        if (
+                entity_occurrences[
+                    "entity_name"
+                ]
+                        .fillna("")
+                        .str.strip()
+                        .eq("")
+                        .any()
+        ):
+            raise ValueError(
+                "Dangling-ampersand cleanup created "
+                "an empty entity name."
+            )
+
+        return entity_occurrences
+
+    def _clean_routing_prefixes(
+            self,
+            entity_occurrences
+    ):
+        """
+        Remove routing prefixes from the working entity_name
+        after Joint parsing has already occurred.
+
+        The original source value remains preserved in
+        source_entity_name.
+
+        Examples
+        --------
+        C/O JEREMY SHILTS
+            -> JEREMY SHILTS
+
+        C/O: IMAD FARRAN
+            -> IMAD FARRAN
+
+        ATTN: TROY BUTLER
+            -> TROY BUTLER
+
+        % CHARLOTTE A JOSLIN
+            -> CHARLOTTE A JOSLIN
+
+        This does NOT change the occurrence role.
+        """
+
+        entity_occurrences = (
+            entity_occurrences.copy()
+        )
+
+        original_names = (
+            entity_occurrences[
+                "entity_name"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+        cleaned_names = (
+            original_names
+
+            # C/O
+            # C/O:
+            # C / O
+            .str.replace(
+                r"^\s*C\s*/\s*O\s*:?\s*",
+                "",
+                regex=True
+            )
+
+            # ATTN
+            # ATTN:
+            .str.replace(
+                r"^\s*ATTN\s*:?\s*",
+                "",
+                regex=True
+            )
+
+            # Percent-sign routing notation.
+            .str.replace(
+                r"^\s*%\s*",
+                "",
+                regex=True
+            )
+
+            .str.strip()
+        )
+
+        changed_mask = (
+                cleaned_names
+                !=
+                original_names
+        )
+
+        # Defensive check: a routing prefix should never be
+        # the entire entity name.
+        if (
+                cleaned_names[
+                    changed_mask
+                ]
+                        .str.strip()
+                        .eq("")
+                        .any()
+        ):
+            bad_rows = (
+                entity_occurrences.loc[
+                    changed_mask
+                    &
+                    cleaned_names
+                    .str.strip()
+                    .eq(""),
+                    [
+                        "parcel_number",
+                        "source_entity_name",
+                        "source_column"
+                    ]
+                ]
+            )
+
+            raise ValueError(
+                "Routing-prefix cleanup created an empty "
+                "entity name:\n"
+                f"{bad_rows}"
+            )
+
+        entity_occurrences.loc[
+            changed_mask,
+            "entity_name"
+        ] = (
+            cleaned_names[
+                changed_mask
+            ]
+        )
 
         return entity_occurrences
 
@@ -2268,54 +2545,626 @@ class EntityResolver:
     # ----------------------------------------------------------
 
     # Create the merge engine
-    def _merge_entities(self, entities):
+    def _merge_entities(
+            self,
+            entities,
+            entity_occurrences
+    ):
         """
-        Repeatedly apply entity-resolution rules until a complete pass
-        results in no additional entity merges.
+        Repeatedly apply entity-resolution rules until a
+        complete pass results in no additional entity merges.
+
+        entity_occurrences is supplied so contextual resolution
+        rules can use source-occurrence parcel membership without
+        discarding source lineage.
         """
 
         entities = entities.copy()
 
+        # ------------------------------------------------------
+        # Occurrence -> parcel lookup
+        # ------------------------------------------------------
+
+        occurrence_to_parcel = dict(
+            zip(
+                entity_occurrences[
+                    "occurrence_id"
+                ],
+                entity_occurrences[
+                    "parcel_number"
+                ]
+            )
+        )
+
+        # Every provenance occurrence stored in raw_entities
+        # should correspond to an occurrence in entity_occurrences.
+        entity_occurrence_ids = {
+            occurrence_id
+            for occurrence_ids in entities[
+                "_occurrence_ids"
+            ]
+            for occurrence_id in occurrence_ids
+        }
+
+        missing_occurrence_ids = (
+                entity_occurrence_ids
+                -
+                set(
+                    occurrence_to_parcel
+                )
+        )
+
+        if missing_occurrence_ids:
+            raise ValueError(
+                "Entity resolution contains occurrence IDs "
+                "that are missing from entity_occurrences: "
+                f"{sorted(missing_occurrence_ids)[:10]}"
+            )
+
+        # ------------------------------------------------------
+        # Resolution loop
+        # ------------------------------------------------------
+
         while True:
 
-            count_before = len(entities)
+            count_before = len(
+                entities
+            )
 
-            # Contextual matching
+            # --------------------------------------------------
+            # Contextual address / person matching
+            # --------------------------------------------------
+
             entities = self._merge_blank_addresses(
                 entities
             )
 
-            entities = self._merge_missing_street_suffix_variants(
-                entities
+            entities = (
+                self._merge_missing_street_suffix_variants(
+                    entities
+                )
             )
 
             entities = self._merge_zip4_variants(
                 entities
             )
 
-            entities = self._merge_equivalent_person_name_formats(
-                entities
+            entities = (
+                self._merge_equivalent_person_name_formats(
+                    entities
+                )
             )
 
             entities = self._merge_middle_initial_variants(
                 entities
             )
 
-            # Organization name normalization
-            entities = self._merge_organization_name_variants(
-                entities
+            # --------------------------------------------------
+            # Exact-name Organization + shared-parcel matching
+            # --------------------------------------------------
+
+            entities = (
+                self._merge_exact_name_organizations_on_shared_parcel(
+                    entities,
+                    occurrence_to_parcel
+                )
             )
 
-            count_after = len(entities)
+            # --------------------------------------------------
+            # Organization name variants + identical address
+            # --------------------------------------------------
+
+            entities = (
+                self._merge_organization_name_variants_same_address(
+                    entities
+                )
+            )
+
+            entities = (
+                self._merge_organization_name_variants_equivalent_address(
+                    entities
+                )
+            )
+
+            # --------------------------------------------------
+            # Transformation-based matching
+            # --------------------------------------------------
+
+            entities = self._merge_on_match_key(
+                entities,
+                self._expand_common_abbreviations
+            )
+
+            count_after = len(
+                entities
+            )
 
             if count_after == count_before:
                 break
 
-        return entities.reset_index(drop=True)
+        return entities.reset_index(
+            drop=True
+        )
 
     # ----------------------------------------------------------
     # Resolution Rules
     # ----------------------------------------------------------
+    def _merge_exact_name_organizations_on_shared_parcel(
+            self,
+            entities,
+            occurrence_to_parcel
+    ):
+        """
+        Merge Organization entities when:
+
+            1. canonical_name matches exactly, and
+            2. their source occurrences overlap on at least one
+               parcel.
+
+        Different canonical addresses are allowed.
+
+        This rule is intended to resolve role/address
+        fragmentation such as:
+
+            SAME ORGANIZATION
+            Owner        -> address A
+            Tax Send To  -> address B
+
+        when both representations occur on the same parcel.
+
+        The rule is deliberately conservative:
+
+            - Organization only
+            - exact canonical-name equality
+            - requires shared parcel context
+            - no punctuation normalization
+            - no fuzzy name matching
+
+        Connected components are merged transitively.
+
+        Example
+        -------
+        Entity A:
+            1119 JEFFERSON LLC
+            parcel X
+
+        Entity B:
+            1119 JEFFERSON LLC
+            parcel X and parcel Y
+
+        Entity C:
+            1119 JEFFERSON LLC
+            parcel Y
+
+        A, B, and C form one connected identity group even
+        though A and C do not directly share a parcel.
+        """
+
+        entities = (
+            entities.copy()
+            .reset_index(
+                drop=True
+            )
+        )
+
+        organizations = (
+            entities[
+                entities[
+                    "entity_type"
+                ]
+                == "Organization"
+                ]
+        )
+
+        groups_to_merge = []
+
+        # ------------------------------------------------------
+        # Work independently within each exact canonical name.
+        # ------------------------------------------------------
+
+        for canonical_name, group in (
+                organizations.groupby(
+                    "canonical_name",
+                    sort=False,
+                    dropna=False
+                )
+        ):
+
+            if len(group) < 2:
+                continue
+
+            indexes = (
+                group.index
+                .tolist()
+            )
+
+            # --------------------------------------------------
+            # Union-find structure
+            # --------------------------------------------------
+
+            parent = {
+                index: index
+                for index in indexes
+            }
+
+            def find(index):
+
+                while parent[index] != index:
+                    parent[index] = (
+                        parent[
+                            parent[index]
+                        ]
+                    )
+
+                    index = parent[index]
+
+                return index
+
+            def union(
+                    index_a,
+                    index_b
+            ):
+
+                root_a = find(
+                    index_a
+                )
+
+                root_b = find(
+                    index_b
+                )
+
+                if root_a != root_b:
+                    parent[root_b] = root_a
+
+            # --------------------------------------------------
+            # Find which entity rows occur on each parcel.
+            # --------------------------------------------------
+
+            parcel_to_indexes = {}
+
+            for index, row in group.iterrows():
+
+                occurrence_ids = (
+                    row[
+                        "_occurrence_ids"
+                    ]
+                )
+
+                for occurrence_id in occurrence_ids:
+
+                    parcel_number = (
+                        occurrence_to_parcel.get(
+                            occurrence_id
+                        )
+                    )
+
+                    if parcel_number is None:
+                        raise ValueError(
+                            "Occurrence "
+                            f"{occurrence_id} "
+                            "has no parcel mapping."
+                        )
+
+                    parcel_to_indexes.setdefault(
+                        parcel_number,
+                        []
+                    ).append(
+                        index
+                    )
+
+            # --------------------------------------------------
+            # Entities sharing a parcel belong to the same
+            # connected identity component.
+            # --------------------------------------------------
+
+            for parcel_indexes in (
+                    parcel_to_indexes.values()
+            ):
+
+                parcel_indexes = list(
+                    dict.fromkeys(
+                        parcel_indexes
+                    )
+                )
+
+                if len(parcel_indexes) < 2:
+                    continue
+
+                anchor = (
+                    parcel_indexes[0]
+                )
+
+                for other_index in (
+                        parcel_indexes[1:]
+                ):
+                    union(
+                        anchor,
+                        other_index
+                    )
+
+            # --------------------------------------------------
+            # Convert the union-find structure into disjoint
+            # merge groups.
+            # --------------------------------------------------
+
+            components = {}
+
+            for index in indexes:
+                root = find(
+                    index
+                )
+
+                components.setdefault(
+                    root,
+                    []
+                ).append(
+                    index
+                )
+
+            for component in (
+                    components.values()
+            ):
+
+                if len(component) > 1:
+                    groups_to_merge.append(
+                        component
+                    )
+
+        if not groups_to_merge:
+            return entities
+
+        return self._collapse_index_groups(
+            entities,
+            groups_to_merge
+        )
+
+    def _merge_organization_name_variants_same_address(
+            self,
+            entities
+    ):
+        """
+        Merge Organization entities whose names differ only by
+        conservative punctuation/spacing variation when they
+        share the exact same nonblank canonical address.
+
+        Requirements
+        ------------
+        - Both/all entities must be Organizations.
+        - canonical_address must be nonblank.
+        - canonical_address must match exactly.
+        - organization_type must match.
+        - Names must match under either:
+              punctuation normalization, or
+              compact normalization.
+
+        The compact rule is safe here because exact address and
+        organization type provide additional corroboration.
+
+        This rule does NOT:
+        - merge solely because names look similar,
+        - merge entities with different addresses,
+        - perform fuzzy matching,
+        - modify source_entity_name.
+        """
+
+        entities = (
+            entities.copy()
+            .reset_index(
+                drop=True
+            )
+        )
+
+        # ------------------------------------------------------
+        # Temporary matching keys
+        # ------------------------------------------------------
+
+        entities[
+            "_org_punctuation_key"
+        ] = ""
+
+        entities[
+            "_org_compact_key"
+        ] = ""
+
+        organization_mask = (
+                entities[
+                    "entity_type"
+                ]
+                == "Organization"
+        )
+
+        nonblank_address_mask = (
+                entities[
+                    "canonical_address"
+                ]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                != ""
+        )
+
+        eligible_mask = (
+                organization_mask
+                &
+                nonblank_address_mask
+        )
+
+        entities.loc[
+            eligible_mask,
+            "_org_punctuation_key"
+        ] = (
+            entities.loc[
+                eligible_mask,
+                "canonical_name"
+            ]
+            .apply(
+                self._organization_punctuation_key
+            )
+        )
+
+        entities.loc[
+            eligible_mask,
+            "_org_compact_key"
+        ] = (
+            entities.loc[
+                eligible_mask,
+                "canonical_name"
+            ]
+            .apply(
+                self._organization_compact_key
+            )
+        )
+
+        # ------------------------------------------------------
+        # Pass 1:
+        # conservative punctuation variants
+        # ------------------------------------------------------
+
+        eligible = (
+            entities[
+                eligible_mask
+            ]
+        )
+
+        groups_to_merge = []
+
+        for _, group in eligible.groupby(
+                [
+                    "canonical_address",
+                    "organization_type",
+                    "_org_punctuation_key"
+                ],
+                dropna=False,
+                sort=False
+        ):
+
+            # We only care about actual name variants.
+            if (
+                    len(group) > 1
+                    and
+                    group[
+                        "canonical_name"
+                    ].nunique() > 1
+            ):
+                groups_to_merge.append(
+                    group.index.tolist()
+                )
+
+        if groups_to_merge:
+            entities = (
+                self._collapse_index_groups(
+                    entities,
+                    groups_to_merge
+                )
+            )
+
+        # ------------------------------------------------------
+        # Rebuild temporary keys because row indexes/entities may
+        # have changed after the first pass.
+        # ------------------------------------------------------
+
+        entities[
+            "_org_punctuation_key"
+        ] = ""
+
+        entities[
+            "_org_compact_key"
+        ] = ""
+
+        organization_mask = (
+                entities[
+                    "entity_type"
+                ]
+                == "Organization"
+        )
+
+        nonblank_address_mask = (
+                entities[
+                    "canonical_address"
+                ]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                != ""
+        )
+
+        eligible_mask = (
+                organization_mask
+                &
+                nonblank_address_mask
+        )
+
+        entities.loc[
+            eligible_mask,
+            "_org_compact_key"
+        ] = (
+            entities.loc[
+                eligible_mask,
+                "canonical_name"
+            ]
+            .apply(
+                self._organization_compact_key
+            )
+        )
+
+        eligible = (
+            entities[
+                eligible_mask
+            ]
+        )
+
+        # ------------------------------------------------------
+        # Pass 2:
+        # compact spacing/punctuation variants
+        # ------------------------------------------------------
+
+        groups_to_merge = []
+
+        for _, group in eligible.groupby(
+                [
+                    "canonical_address",
+                    "organization_type",
+                    "_org_compact_key"
+                ],
+                dropna=False,
+                sort=False
+        ):
+
+            if (
+                    len(group) > 1
+                    and
+                    group[
+                        "canonical_name"
+                    ].nunique() > 1
+            ):
+                groups_to_merge.append(
+                    group.index.tolist()
+                )
+
+        if groups_to_merge:
+            entities = (
+                self._collapse_index_groups(
+                    entities,
+                    groups_to_merge
+                )
+            )
+
+        # ------------------------------------------------------
+        # Remove audit-only matching columns
+        # ------------------------------------------------------
+
+        entities = entities.drop(
+            columns=[
+                "_org_punctuation_key",
+                "_org_compact_key"
+            ],
+            errors="ignore"
+        )
+
+        return entities.reset_index(
+            drop=True
+        )
+
 
     def _merge_blank_addresses(self, entities):
         """
@@ -2717,6 +3566,545 @@ class EntityResolver:
                 "canonical_name",
                 "canonical_address"
             ]
+        )
+
+    def _merge_org_variants_zip_equivalent(
+            self,
+            entities,
+            name_transform
+    ):
+        """
+        Merge Organization name variants whose addresses differ
+        only by ZIP+4 information.
+
+        Also tolerates a malformed dangling ZIP hyphen such as:
+
+            49007-
+
+        Requirements
+        ------------
+        - Organization only.
+        - Organization type must match.
+        - Names must match under name_transform.
+        - Address content before ZIP must match.
+        - ZIP5 must match.
+        - Conflicting ZIP+4 values are rejected.
+        """
+
+        entities = (
+            entities.copy()
+            .reset_index(
+                drop=True
+            )
+        )
+
+        candidate_rows = []
+
+        for index, row in entities.iterrows():
+
+            if (
+                    row["entity_type"]
+                    != "Organization"
+            ):
+                continue
+
+            address = (
+                self._prepare_address_for_variant_matching(
+                    row[
+                        "canonical_address"
+                    ]
+                )
+            )
+
+            if not address:
+                continue
+
+            parsed = (
+                self._parse_zip4_for_matching(
+                    address
+                )
+            )
+
+            if parsed is None:
+                continue
+
+            candidate_rows.append({
+                "row_index":
+                    index,
+
+                "organization_type":
+                    row[
+                        "organization_type"
+                    ],
+
+                "canonical_name":
+                    row[
+                        "canonical_name"
+                    ],
+
+                "canonical_address":
+                    row[
+                        "canonical_address"
+                    ],
+
+                "name_match_key":
+                    name_transform(
+                        row[
+                            "canonical_name"
+                        ]
+                    ),
+
+                "address_match_key":
+                    parsed[
+                        "address_match_key"
+                    ],
+
+                "zip4":
+                    parsed[
+                        "zip4"
+                    ]
+            })
+
+        if not candidate_rows:
+            return entities
+
+        candidates = pd.DataFrame(
+            candidate_rows
+        )
+
+        groups_to_merge = []
+
+        group_columns = [
+            "organization_type",
+            "name_match_key",
+            "address_match_key"
+        ]
+
+        for _, group in candidates.groupby(
+                group_columns,
+                dropna=False,
+                sort=False
+        ):
+
+            if len(group) < 2:
+                continue
+
+            # This rule exists for actual name variants.
+            if (
+                    group[
+                        "canonical_name"
+                    ].nunique()
+                    < 2
+            ):
+                continue
+
+            nonblank_zip4_values = {
+                zip4
+                for zip4 in group[
+                    "zip4"
+                ]
+                if zip4
+            }
+
+            # Never merge conflicting ZIP+4 values.
+            if (
+                    len(
+                        nonblank_zip4_values
+                    )
+                    > 1
+            ):
+                continue
+
+            indexes = (
+                group[
+                    "row_index"
+                ]
+                .tolist()
+            )
+
+            # ----------------------------------------------
+            # Pick the best actual source address.
+            #
+            # Prefer:
+            #   1. valid ZIP+4
+            #   2. normal ZIP5
+            #   3. malformed ZIP5-
+            # ----------------------------------------------
+
+            def address_score(address):
+
+                address = str(
+                    address
+                ).strip()
+
+                if re.search(
+                        r"\b\d{5}-\d{4}$",
+                        address
+                ):
+                    return 3
+
+                if re.search(
+                        r"\b\d{5}$",
+                        address
+                ):
+                    return 2
+
+                if re.search(
+                        r"\b\d{5}-$",
+                        address
+                ):
+                    return 1
+
+                return 0
+
+            preferred_address = max(
+                group[
+                    "canonical_address"
+                ],
+                key=address_score
+            )
+
+            # Standardize only the working resolved-entity
+            # representation before collapse.
+            for row_index in indexes:
+                entities.at[
+                    row_index,
+                    "canonical_address"
+                ] = (
+                    preferred_address
+                )
+
+            groups_to_merge.append(
+                indexes
+            )
+
+        if not groups_to_merge:
+            return entities
+
+        return self._collapse_index_groups(
+            entities,
+            groups_to_merge
+        )
+
+    def _merge_org_variants_missing_street_suffix(
+            self,
+            entities,
+            name_transform
+    ):
+        """
+        Merge Organization name variants whose addresses differ
+        only because one address omits a street suffix.
+
+        Example
+        -------
+        ONE DAY LLC.
+            1417 ACADEMY ST, KALAMAZOO, MI 49006
+
+        ONE DAY, LLC.
+            1417 ACADEMY, KALAMAZOO, MI 49006
+
+        Requirements
+        ------------
+        - Organization only.
+        - Organization type must match.
+        - Names must match under name_transform.
+        - Street base must match exactly.
+        - Unit must match exactly.
+        - Locality must match exactly after safe ZIP+4
+          normalization.
+        - One representation must omit the street suffix.
+        - Exactly one nonblank street suffix may exist.
+        - Conflicting ZIP+4 values are rejected.
+        """
+
+        entities = (
+            entities.copy()
+            .reset_index(
+                drop=True
+            )
+        )
+
+        candidate_rows = []
+
+        for index, row in entities.iterrows():
+
+            if (
+                    row["entity_type"]
+                    != "Organization"
+            ):
+                continue
+
+            original_address = (
+                self._prepare_address_for_variant_matching(
+                    row[
+                        "canonical_address"
+                    ]
+                )
+            )
+
+            if not original_address:
+                continue
+
+            zip_parsed = (
+                self._parse_zip4_for_matching(
+                    original_address
+                )
+            )
+
+            # Normalize ZIP+4 only for comparison.
+            matching_address = (
+                self._normalize_zip4_for_matching(
+                    original_address
+                )
+            )
+
+            parsed = (
+                self._parse_address_for_suffix_matching(
+                    matching_address
+                )
+            )
+
+            if parsed is None:
+                continue
+
+            candidate_rows.append({
+                "row_index":
+                    index,
+
+                "organization_type":
+                    row[
+                        "organization_type"
+                    ],
+
+                "canonical_name":
+                    row[
+                        "canonical_name"
+                    ],
+
+                "canonical_address":
+                    row[
+                        "canonical_address"
+                    ],
+
+                "name_match_key":
+                    name_transform(
+                        row[
+                            "canonical_name"
+                        ]
+                    ),
+
+                "street_base":
+                    parsed[
+                        "street_base"
+                    ],
+
+                "street_suffix":
+                    parsed[
+                        "street_suffix"
+                    ],
+
+                "unit":
+                    parsed[
+                        "unit"
+                    ],
+
+                "locality":
+                    parsed[
+                        "locality"
+                    ],
+
+                "zip4":
+                    (
+                        zip_parsed[
+                            "zip4"
+                        ]
+                        if zip_parsed
+                           is not None
+                        else ""
+                    )
+            })
+
+        if not candidate_rows:
+            return entities
+
+        candidates = pd.DataFrame(
+            candidate_rows
+        )
+
+        groups_to_merge = []
+
+        group_columns = [
+            "organization_type",
+            "name_match_key",
+            "street_base",
+            "unit",
+            "locality"
+        ]
+
+        for _, group in candidates.groupby(
+                group_columns,
+                dropna=False,
+                sort=False
+        ):
+
+            if len(group) < 2:
+                continue
+
+            if (
+                    group[
+                        "canonical_name"
+                    ].nunique()
+                    < 2
+            ):
+                continue
+
+            suffixes = set(
+                group[
+                    "street_suffix"
+                ]
+            )
+
+            nonblank_suffixes = {
+                suffix
+                for suffix in suffixes
+                if suffix
+            }
+
+            # Must contain at least one representation
+            # without a suffix.
+            if "" not in suffixes:
+                continue
+
+            # Exactly one known suffix is allowed.
+            if (
+                    len(
+                        nonblank_suffixes
+                    )
+                    != 1
+            ):
+                continue
+
+            nonblank_zip4_values = {
+                zip4
+                for zip4 in group[
+                    "zip4"
+                ]
+                if zip4
+            }
+
+            # Reject contradictory ZIP+4 information.
+            if (
+                    len(
+                        nonblank_zip4_values
+                    )
+                    > 1
+            ):
+                continue
+
+            known_suffix = next(
+                iter(
+                    nonblank_suffixes
+                )
+            )
+
+            suffixed_rows = (
+                group[
+                    group[
+                        "street_suffix"
+                    ]
+                    == known_suffix
+                    ]
+            )
+
+            preferred_addresses = (
+                suffixed_rows[
+                    "canonical_address"
+                ]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            # Additional unexplained variation means we
+            # should leave the group unresolved.
+            if (
+                    len(
+                        preferred_addresses
+                    )
+                    != 1
+            ):
+                continue
+
+            preferred_address = (
+                preferred_addresses[0]
+            )
+
+            indexes = (
+                group[
+                    "row_index"
+                ]
+                .tolist()
+            )
+
+            for row_index in indexes:
+                entities.at[
+                    row_index,
+                    "canonical_address"
+                ] = (
+                    preferred_address
+                )
+
+            groups_to_merge.append(
+                indexes
+            )
+
+        if not groups_to_merge:
+            return entities
+
+        return self._collapse_index_groups(
+            entities,
+            groups_to_merge
+        )
+
+    def _merge_organization_name_variants_equivalent_address(
+            self,
+            entities
+    ):
+        """
+        Resolve Organization-name variants using already-approved
+        forms of address equivalence.
+
+        Supported address differences:
+            - ZIP5 versus ZIP+4
+            - malformed trailing ZIP hyphen
+            - missing street suffix
+
+        Does not perform fuzzy address matching.
+        """
+
+        entities = entities.copy()
+
+        name_transforms = [
+            self._organization_punctuation_key,
+            self._organization_compact_key
+        ]
+
+        for name_transform in name_transforms:
+            entities = (
+                self._merge_org_variants_zip_equivalent(
+                    entities,
+                    name_transform
+                )
+            )
+
+            entities = (
+                self._merge_org_variants_missing_street_suffix(
+                    entities,
+                    name_transform
+                )
+            )
+
+        return entities.reset_index(
+            drop=True
         )
 
     def _merge_equivalent_person_name_formats(self, entities):
@@ -3503,6 +4891,77 @@ class EntityResolver:
 
         return name
 
+    def _organization_punctuation_key(
+            self,
+            name
+    ):
+        """
+        Create a conservative Organization-name matching key.
+
+        Used only for entity resolution. Does not modify the
+        source or canonical name directly.
+
+        Examples
+        --------
+        ABSOLUTE HEAVEN LLC
+        ABSOLUTE HEAVEN, LLC
+            -> ABSOLUTE HEAVEN LLC
+
+        S.T.D. MANAGEMENT, LLC
+        STD MANAGEMENT LLC
+            -> STD MANAGEMENT LLC
+        """
+
+        if pd.isna(name):
+            return ""
+
+        name = str(
+            name
+        ).upper().strip()
+
+        # Remove periods and commas.
+        name = re.sub(
+            r"[.,]",
+            "",
+            name
+        )
+
+        # Normalize whitespace.
+        name = re.sub(
+            r"\s+",
+            " ",
+            name
+        ).strip()
+
+        return name
+
+    def _organization_compact_key(
+            self,
+            name
+    ):
+        """
+        Create a more aggressive Organization-only matching key
+        used exclusively when the entities also have the exact
+        same nonblank canonical address.
+
+        Example
+        -------
+        THE COPPER CREEK TRUST
+        THE COPPERCREEK TRUST
+            -> THECOPPERCREEKTRUST
+        """
+
+        if pd.isna(name):
+            return ""
+
+        return re.sub(
+            r"[^A-Z0-9]",
+            "",
+            str(
+                name
+            ).upper()
+        )
+
     # ----------------------------------------------------------
     # Matching Helpers
     # ----------------------------------------------------------
@@ -4039,6 +5498,41 @@ class EntityResolver:
             ),
             "locality": locality
         }
+
+    def _prepare_address_for_variant_matching(
+            self,
+            address
+    ):
+        """
+        Perform very limited cleanup used only for organization-
+        variant address matching.
+
+        In particular, remove a dangling hyphen after a five-digit
+        ZIP code:
+
+            49007-
+                -> 49007
+
+        This does NOT modify the stored canonical address.
+        """
+
+        if pd.isna(address):
+            return ""
+
+        address = str(
+            address
+        ).strip()
+
+        if not address:
+            return ""
+
+        address = re.sub(
+            r"(\b\d{5})-\s*$",
+            r"\1",
+            address
+        )
+
+        return address
 
     # ----------------------------------------------------------
     # Canonicalization Helpers
