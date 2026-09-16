@@ -3,6 +3,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from api.database import engine
+from api.routers import (
+    associations,
+    entities
+)
 
 
 # ==========================================================
@@ -16,6 +20,19 @@ app = FastAPI(
         "entity-association information."
     ),
     version="0.1.0"
+)
+
+
+# ==========================================================
+# ROUTERS
+# ==========================================================
+
+app.include_router(
+    entities.router
+)
+
+app.include_router(
+    associations.router
 )
 
 
