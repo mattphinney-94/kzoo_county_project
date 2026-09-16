@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+audits/
+hs_err_pid*.log
+database/__pycache__/
