@@ -6,3 +6,4 @@ venv/
 audits/
 hs_err_pid*.log
 database/__pycache__/
+.pytest_cache/

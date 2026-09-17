@@ -1,0 +1,10 @@
+pandas
+openpyxl
+SQLAlchemy
+PyMySQL
+fastapi
+uvicorn
+pydantic
+python-dotenv
+pytest
+httpx
