@@ -15,24 +15,83 @@ and that the following MySQL objects exist:
 """
 
 import os
-from getpass import getpass
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 
-
 # ==========================================================
 # DATABASE CONFIGURATION
 # ==========================================================
 
-DB_HOST = "localhost"
-DB_PORT = 3306
-DB_NAME = "kalamazoo_county_treasury"
+def _get_database_config(
+        db_user=None,
+        db_password=None
+):
+    """
+    Read ETL database configuration from environment variables.
 
-# Change this if your MySQL username is different.
-DB_USER = "root"
+    Explicit db_user/db_password values may be supplied for
+    testing or other controlled use.
+    """
 
+    db_host = os.getenv(
+        "TREASURY_DB_HOST",
+        "localhost"
+    )
+
+    db_port = int(
+        os.getenv(
+            "TREASURY_DB_PORT",
+            "3306"
+        )
+    )
+
+    db_name = os.getenv(
+        "TREASURY_DB_NAME",
+        "kalamazoo_county_treasury"
+    )
+
+    db_user = (
+        db_user
+        or os.getenv(
+            "TREASURY_ETL_DB_USER"
+        )
+    )
+
+    db_password = (
+        db_password
+        or os.getenv(
+            "TREASURY_ETL_DB_PASSWORD"
+        )
+    )
+
+    missing_settings = []
+
+    if not db_user:
+        missing_settings.append(
+            "TREASURY_ETL_DB_USER"
+        )
+
+    if not db_password:
+        missing_settings.append(
+            "TREASURY_ETL_DB_PASSWORD"
+        )
+
+    if missing_settings:
+        raise RuntimeError(
+            "Missing required ETL database "
+            "environment variables: "
+            f"{', '.join(missing_settings)}"
+        )
+
+    return {
+        "host": db_host,
+        "port": db_port,
+        "name": db_name,
+        "user": db_user,
+        "password": db_password
+    }
 
 # ==========================================================
 # PARCEL TABLE CREATION
@@ -433,7 +492,8 @@ def _validate_pipeline_outputs(
 # ==========================================================
 
 def _validate_database_schema(
-        connection
+        connection,
+        database_name
 ):
     """
     Confirm that create_schema.sql has already created all
@@ -446,7 +506,11 @@ def _validate_database_schema(
         "parcel_entity_roles",
         "entity_associations",
         "association_evidence",
-        "entity_occurrences"
+        "entity_occurrences",
+
+        "data_snapshots",
+        "active_data_snapshot",
+        "association_suppressions"
     }
 
     table_query = text(
@@ -461,7 +525,7 @@ def _validate_database_schema(
     result = connection.execute(
         table_query,
         {
-            "database_name": DB_NAME
+            "database_name": database_name
         }
     )
 
@@ -496,7 +560,7 @@ def _validate_database_schema(
         connection.execute(
             view_query,
             {
-                "database_name": DB_NAME
+                "database_name": database_name
             }
         )
         .first()
@@ -671,6 +735,157 @@ def _validate_loaded_database(
         "\nDatabase validation passed."
     )
 
+# ==========================================================
+# SNAPSHOT REGISTRATION
+# ==========================================================
+
+def _register_and_activate_snapshot(
+        connection,
+        *,
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by=None,
+        notes=None
+):
+    """
+    Record a successfully loaded data snapshot and mark it as
+    the snapshot currently represented by the generated tables.
+
+    This function must be called inside the same transaction as
+    the generated-table refresh.
+    """
+
+    snapshot_code = snapshot_code.strip()
+    source_filename = source_filename.strip()
+
+    if loaded_by is not None:
+        loaded_by = loaded_by.strip() or None
+
+    if notes is not None:
+        notes = notes.strip() or None
+
+    if not snapshot_code:
+        raise ValueError(
+            "snapshot_code cannot be blank."
+        )
+
+    if not source_filename:
+        raise ValueError(
+            "source_filename cannot be blank."
+        )
+
+    if not isinstance(tax_year, int):
+        raise ValueError(
+            "tax_year must be an integer."
+        )
+
+    if not 2000 <= tax_year <= 2200:
+        raise ValueError(
+            "tax_year must be between 2000 and 2200."
+        )
+
+    # Snapshot codes identify one particular successful load.
+    # Reusing one would make the historical record ambiguous.
+    existing_snapshot_query = text(
+        """
+        SELECT snapshot_id
+
+        FROM data_snapshots
+
+        WHERE snapshot_code = :snapshot_code
+        """
+    )
+
+    existing_snapshot_id = (
+        connection.execute(
+            existing_snapshot_query,
+            {
+                "snapshot_code":
+                    snapshot_code
+            }
+        )
+        .scalar_one_or_none()
+    )
+
+    if existing_snapshot_id is not None:
+        raise ValueError(
+            "Snapshot code already exists: "
+            f"{snapshot_code}"
+        )
+
+    insert_snapshot_query = text(
+        """
+        INSERT INTO data_snapshots (
+            snapshot_code,
+            tax_year,
+            source_filename,
+            loaded_by,
+            notes
+        )
+        VALUES (
+            :snapshot_code,
+            :tax_year,
+            :source_filename,
+            :loaded_by,
+            :notes
+        )
+        """
+    )
+
+    result = connection.execute(
+        insert_snapshot_query,
+        {
+            "snapshot_code":
+                snapshot_code,
+
+            "tax_year":
+                tax_year,
+
+            "source_filename":
+                source_filename,
+
+            "loaded_by":
+                loaded_by,
+
+            "notes":
+                notes
+        }
+    )
+
+    snapshot_id = result.lastrowid
+
+    if snapshot_id is None:
+        raise RuntimeError(
+            "Snapshot record was created but no "
+            "snapshot_id was returned."
+        )
+
+    activate_snapshot_query = text(
+        """
+        INSERT INTO active_data_snapshot (
+            singleton_id,
+            snapshot_id
+        )
+        VALUES (
+            1,
+            :snapshot_id
+        )
+
+        ON DUPLICATE KEY UPDATE
+            snapshot_id = :snapshot_id
+        """
+    )
+
+    connection.execute(
+        activate_snapshot_query,
+        {
+            "snapshot_id":
+                snapshot_id
+        }
+    )
+
+    return snapshot_id
 
 # ==========================================================
 # PUBLIC LOAD FUNCTION
@@ -684,6 +899,11 @@ def load_database(
         entity_associations,
         entity_occurrences,
         *,
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by=None,
+        snapshot_notes=None,
         db_user=None,
         db_password=None
 ):
@@ -696,9 +916,11 @@ def load_database(
 
     print("Entered load_database().")
 
-    db_user = (
-        db_user
-        or DB_USER
+    database_config = (
+        _get_database_config(
+            db_user=db_user,
+            db_password=db_password
+        )
     )
 
     print("Creating parcels DataFrame...")
@@ -793,18 +1015,6 @@ def load_database(
     print("DataFrames prepared for SQL.")
     print("Ready to connect to MySQL.")
 
-    if db_password is None:
-        db_password = os.getenv(
-            "MYSQL_PASSWORD"
-        )
-
-    if not db_password:
-        db_password = getpass(
-            f"MySQL password for {db_user}: "
-        )
-
-    print("Database credentials obtained.")
-
     # ----------------------------------------------------------
     # Expected row counts
     # ----------------------------------------------------------
@@ -853,11 +1063,11 @@ def load_database(
 
     database_url = URL.create(
         drivername="mysql+pymysql",
-        username=db_user,
-        password=db_password,
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME
+        username=database_config["user"],
+        password=database_config["password"],
+        host=database_config["host"],
+        port=database_config["port"],
+        database=database_config["name"]
     )
 
     engine = create_engine(
@@ -881,10 +1091,9 @@ def load_database(
             )
 
             _validate_database_schema(
-                connection
+                connection,
+                database_config["name"]
             )
-
-            # ...rest unchanged...
 
             _clear_database(
                 connection
@@ -937,6 +1146,33 @@ def load_database(
             _validate_loaded_database(
                 connection,
                 expected_counts
+            )
+
+            snapshot_id = (
+                _register_and_activate_snapshot(
+                    connection,
+                    snapshot_code=snapshot_code,
+                    tax_year=tax_year,
+                    source_filename=source_filename,
+                    loaded_by=loaded_by,
+                    notes=snapshot_notes
+                )
+            )
+
+            print(
+                "\nRegistered data snapshot:"
+            )
+
+            print(
+                f"  snapshot_id:   {snapshot_id}"
+            )
+
+            print(
+                f"  snapshot_code: {snapshot_code}"
+            )
+
+            print(
+                f"  tax_year:      {tax_year}"
             )
 
         print(

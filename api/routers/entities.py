@@ -426,51 +426,63 @@ def get_entity_associations(
 
     associations_query = text(
         """
-        SELECT
-            n.association_id,
+        SELECT n.association_id,
 
-            associated.entity_id
-                AS associated_entity_id,
+               associated.entity_id
+                   AS associated_entity_id,
 
-            associated.canonical_name
-                AS associated_canonical_name,
+               associated.canonical_name
+                   AS associated_canonical_name,
 
-            associated.entity_type
-                AS associated_entity_type,
+               associated.entity_type
+                   AS associated_entity_type,
 
-            associated.canonical_address
-                AS associated_canonical_address,
+               associated.canonical_address
+                   AS associated_canonical_address,
 
-            associated.organization_type
-                AS associated_organization_type,
+               associated.organization_type
+                   AS associated_organization_type,
 
-            associated.organization_classification_confidence
-                AS associated_organization_classification_confidence,
+               associated.organization_classification_confidence
+                   AS associated_organization_classification_confidence,
 
-            n.association_confidence,
-            n.evidence_count,
-            n.evidence_rule_count
+               n.association_confidence,
+               n.evidence_count,
+               n.evidence_rule_count
 
         FROM entity_association_neighbors n
 
-        JOIN entities associated
-            ON associated.entity_id
-                = n.associated_entity_id
+                 JOIN entities associated
+                      ON associated.entity_id
+                          = n.associated_entity_id
 
         WHERE n.entity_id = :entity_id
 
-        ORDER BY
-            CASE n.association_confidence
-                WHEN 'High' THEN 1
-                WHEN 'Medium' THEN 2
-                WHEN 'Low' THEN 3
-                ELSE 4
-            END,
+          AND NOT EXISTS (SELECT 1
 
-            n.evidence_count DESC,
-            n.evidence_rule_count DESC,
-            associated.canonical_name,
-            associated.entity_id
+                          FROM association_suppressions suppression
+
+                                   JOIN active_data_snapshot active_snapshot
+                                        ON active_snapshot.snapshot_id
+                                            = suppression.snapshot_id
+
+                          WHERE active_snapshot.singleton_id = 1
+
+                            AND suppression.association_id
+                              = n.association_id
+
+                            AND suppression.revoked_at IS NULL)
+
+        ORDER BY CASE n.association_confidence
+                     WHEN 'High' THEN 1
+                     WHEN 'Medium' THEN 2
+                     WHEN 'Low' THEN 3
+                     ELSE 4
+                     END,
+                 n.evidence_count DESC,
+                 n.evidence_rule_count DESC,
+                 associated.canonical_name,
+                 associated.entity_id
         """
     )
 

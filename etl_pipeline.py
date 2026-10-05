@@ -1,19 +1,147 @@
 import time
 import pandas as pd
+import argparse
 
 from data_cleaning import DataCleaner
 from extraction import extract_data
 from entity_resolution import EntityResolver
 from database.load_database import load_database
+from pathlib import Path
+from dotenv import load_dotenv
 
+load_dotenv()
 
 pd.set_option("display.width", 1000)
 pd.set_option("display.max_columns", None)
 
 
+def parse_arguments():
+    """
+    Parse command-line arguments for an annual Treasury
+    dataset refresh.
+    """
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the Kalamazoo County Treasury "
+            "entity-resolution ETL pipeline."
+        )
+    )
+
+    parser.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "Path to the source Excel workbook."
+        )
+    )
+
+    parser.add_argument(
+        "--sheet",
+        default="Only Delinquent Parcels",
+        help=(
+            "Excel worksheet to process. "
+            "Defaults to 'Only Delinquent Parcels'."
+        )
+    )
+
+    parser.add_argument(
+        "--year",
+        type=int,
+        required=True,
+        help="Tax year represented by the dataset."
+    )
+
+    parser.add_argument(
+        "--snapshot-code",
+        help=(
+            "Unique code for this particular "
+            "successful load, such as 2026-v1."
+        )
+    )
+
+    parser.add_argument(
+        "--loaded-by",
+        default="Treasury ETL",
+        help=(
+            "Name recorded as the person or process "
+            "performing the refresh."
+        )
+    )
+
+    parser.add_argument(
+        "--notes",
+        default=None,
+        help="Optional snapshot notes."
+    )
+
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help=(
+            "Run extraction, cleaning, entity resolution, "
+            "and validation without modifying MySQL."
+        )
+    )
+
+    args = parser.parse_args()
+
+    if not 2000 <= args.year <= 2200:
+        parser.error(
+            "--year must be between 2000 and 2200."
+        )
+
+    if (
+        not args.validate_only
+        and not args.snapshot_code
+    ):
+        parser.error(
+            "--snapshot-code is required unless "
+            "--validate-only is used."
+        )
+
+    return args
+
+
 def main():
 
     total_start = time.perf_counter()
+
+    args = parse_arguments()
+
+    input_path = Path(
+        args.input
+    )
+
+    if not input_path.is_file():
+        raise FileNotFoundError(
+            f"Input file does not exist: "
+            f"{input_path}"
+        )
+
+    print(
+        "\n"
+        "==========================================\n"
+        "KALAMAZOO COUNTY TREASURY ETL\n"
+        "=========================================="
+    )
+
+    print(
+        f"Input file:    {input_path}"
+    )
+
+    print(
+        f"Worksheet:     {args.sheet}"
+    )
+
+    print(
+        f"Tax year:      {args.year}"
+    )
+
+    print(
+        f"Snapshot code: "
+        f"{args.snapshot_code or 'N/A - validation only'}"
+    )
 
     # ----------------------------------------------------------
     # Extract
@@ -23,8 +151,8 @@ def main():
     start = time.perf_counter()
 
     extracted_df = extract_data(
-        "2025 Roll - Parcels Export.xlsx",
-        "Only Delinquent Parcels"
+        str(input_path),
+        args.sheet
     )
 
     print(
@@ -82,13 +210,30 @@ def main():
     print("\n[4/4] Starting database load...")
     start = time.perf_counter()
 
+    if args.validate_only:
+        print(
+            "\n"
+            "==========================================\n"
+            "VALIDATION-ONLY RUN COMPLETED\n"
+            "NO DATABASE CHANGES WERE MADE\n"
+            "=========================================="
+        )
+
+        return
+
     load_database(
-        clean_df=clean_df,
-        entities=entities,
-        parcel_entity_roles=parcel_entity_roles,
-        association_evidence=association_evidence,
-        entity_associations=entity_associations,
-        entity_occurrences=entity_occurrences
+        clean_df,
+        entities,
+        parcel_entity_roles,
+        association_evidence,
+        entity_associations,
+        entity_occurrences,
+
+        snapshot_code=args.snapshot_code,
+        tax_year=args.year,
+        source_filename=input_path.name,
+        loaded_by=args.loaded_by,
+        snapshot_notes=args.notes
     )
 
     print(

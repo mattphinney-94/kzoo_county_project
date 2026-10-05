@@ -38,36 +38,50 @@ def get_association_evidence(
 
     association_query = text(
         """
-        SELECT
-            a.association_id,
+        SELECT a.association_id,
 
-            a.entity_id_a,
-            entity_a.canonical_name
-                AS entity_name_a,
-            entity_a.entity_type
-                AS entity_type_a,
+               a.entity_id_a,
+               entity_a.canonical_name
+                   AS entity_name_a,
+               entity_a.entity_type
+                   AS entity_type_a,
 
-            a.entity_id_b,
-            entity_b.canonical_name
-                AS entity_name_b,
-            entity_b.entity_type
-                AS entity_type_b,
+               a.entity_id_b,
+               entity_b.canonical_name
+                   AS entity_name_b,
+               entity_b.entity_type
+                   AS entity_type_b,
 
-            a.association_confidence,
-            a.evidence_count,
-            a.evidence_rule_count
+               a.association_confidence,
+               a.evidence_count,
+               a.evidence_rule_count
 
         FROM entity_associations a
 
-        JOIN entities entity_a
-            ON entity_a.entity_id
-                = a.entity_id_a
+                 JOIN entities entity_a
+                      ON entity_a.entity_id
+                          = a.entity_id_a
 
-        JOIN entities entity_b
-            ON entity_b.entity_id
-                = a.entity_id_b
+                 JOIN entities entity_b
+                      ON entity_b.entity_id
+                          = a.entity_id_b
 
         WHERE a.association_id = :association_id
+
+          AND NOT EXISTS (SELECT 1
+
+                          FROM association_suppressions suppression
+
+                                   JOIN active_data_snapshot active_snapshot
+                                        ON active_snapshot.snapshot_id
+                                            = suppression.snapshot_id
+
+                          WHERE active_snapshot.singleton_id = 1
+
+                            AND suppression.association_id
+                              = a.association_id
+
+                            AND suppression.revoked_at IS NULL)
         """
     )
 

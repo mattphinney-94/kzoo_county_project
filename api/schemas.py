@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-
+from datetime import datetime
+from pydantic import BaseModel, Field
 
 # ==========================================================
 # ENTITY SEARCH SCHEMAS
@@ -161,3 +161,116 @@ class AssociationEvidenceResponse(BaseModel):
     evidence_rule_count: int
 
     evidence: list[AssociationEvidenceResult]
+
+# ==========================================================
+# ADMIN ASSOCIATION SUPPRESSION SCHEMAS
+# ==========================================================
+
+class AssociationSuppressionRequest(BaseModel):
+    """
+    Administrative request to suppress an association.
+    """
+
+    reason: str = Field(
+        min_length=1,
+        max_length=1000
+    )
+
+    created_by: str = Field(
+        min_length=1,
+        max_length=128
+    )
+
+class AssociationSuppressionResponse(BaseModel):
+    """
+    Confirmation of an association suppression.
+    """
+
+    suppression_id: int
+    snapshot_id: int
+    association_id: int
+
+    entity_id_a: int
+    entity_name_a: str
+
+    entity_id_b: int
+    entity_name_b: str
+
+    reason: str
+    created_by: str
+
+class AssociationSuppressionRestoreRequest(BaseModel):
+    """
+    Administrative request to restore a suppressed association.
+    """
+
+    revoked_by: str = Field(
+        min_length=1,
+        max_length=128
+    )
+
+    revocation_reason: str = Field(
+        min_length=1,
+        max_length=1000
+    )
+
+
+class AssociationSuppressionRestoreResponse(BaseModel):
+    """
+    Confirmation that an association suppression was revoked.
+    """
+
+    suppression_id: int
+    snapshot_id: int
+    association_id: int
+
+    entity_id_a: int
+    entity_name_a: str
+
+    entity_id_b: int
+    entity_name_b: str
+
+    revoked_at: datetime
+    revoked_by: str
+    revocation_reason: str
+
+class AssociationSuppressionRecord(BaseModel):
+    """
+    One administrative association-suppression record.
+    """
+
+    suppression_id: int
+    snapshot_id: int
+    association_id: int
+
+    entity_id_a: int
+    entity_name_a: str
+
+    entity_id_b: int
+    entity_name_b: str
+
+    reason: str
+    created_at: datetime
+    created_by: str
+
+    revoked_at: datetime | None
+    revoked_by: str | None
+    revocation_reason: str | None
+
+    is_active: bool
+
+
+class AssociationSuppressionListResponse(BaseModel):
+    """
+    Administrative list of association suppressions for the
+    currently active data snapshot.
+    """
+
+    snapshot_id: int
+    snapshot_code: str
+    tax_year: int
+
+    include_restored: bool
+    count: int
+
+    suppressions: list[AssociationSuppressionRecord]
