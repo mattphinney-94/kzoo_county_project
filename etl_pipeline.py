@@ -207,7 +207,6 @@ def main():
     # Load Database
     # ----------------------------------------------------------
 
-    print("\n[4/4] Starting database load...")
     start = time.perf_counter()
 
     if args.validate_only:
@@ -220,6 +219,8 @@ def main():
         )
 
         return
+
+    print("\n[4/4] Starting database load...")
 
     load_database(
         clean_df,
