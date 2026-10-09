@@ -1,18 +1,17 @@
 import time
-import pandas as pd
 import argparse
 
 from data_cleaning import DataCleaner
 from extraction import extract_data
 from entity_resolution import EntityResolver
-from database.load_database import load_database
 from pathlib import Path
+from database.load_database import (
+    load_database,
+    validate_pipeline_for_load
+)
 from dotenv import load_dotenv
 
 load_dotenv()
-
-pd.set_option("display.width", 1000)
-pd.set_option("display.max_columns", None)
 
 
 def parse_arguments():
@@ -85,6 +84,11 @@ def parse_arguments():
     )
 
     args = parser.parse_args()
+
+    if args.snapshot_code is not None:
+        args.snapshot_code = (
+            args.snapshot_code.strip()
+        )
 
     if not 2000 <= args.year <= 2200:
         parser.error(
@@ -207,9 +211,16 @@ def main():
     # Load Database
     # ----------------------------------------------------------
 
-    start = time.perf_counter()
-
     if args.validate_only:
+        validate_pipeline_for_load(
+            clean_df,
+            entities,
+            parcel_entity_roles,
+            association_evidence,
+            entity_associations,
+            entity_occurrences
+        )
+
         print(
             "\n"
             "==========================================\n"
@@ -218,9 +229,15 @@ def main():
             "=========================================="
         )
 
+        print(
+            "\nValidation pipeline completed in "
+            f"{time.perf_counter() - total_start:.2f} seconds."
+        )
+
         return
 
     print("\n[4/4] Starting database load...")
+    start = time.perf_counter()
 
     load_database(
         clean_df,

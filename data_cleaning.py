@@ -53,8 +53,62 @@ ENTITY_COLUMNS = [
     "tax_send_to_name"
 ]
 
+REQUIRED_COLUMNS = set(
+    ADDRESS_COLUMNS
+    + NUMERIC_COLUMNS
+    + ENTITY_COLUMNS
+    + [
+        "parcel_number",
+        "property_class"
+    ]
+)
+
 # Create a class for cleaning county parcel data
 class DataCleaner:
+
+    def validate_input(self, df):
+        """
+        Validate the structure of an incoming parcel DataFrame
+        before cleaning begins.
+        """
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(
+                "DataCleaner.clean_data expects "
+                "a pandas DataFrame."
+            )
+
+        if df.empty:
+            raise ValueError(
+                "Input parcel DataFrame is empty."
+            )
+
+        duplicate_columns = (
+            df.columns[
+                df.columns.duplicated()
+            ]
+            .tolist()
+        )
+
+        if duplicate_columns:
+            raise ValueError(
+                "Input DataFrame contains duplicate "
+                "column names: "
+                f"{duplicate_columns}"
+            )
+
+        missing_columns = (
+            REQUIRED_COLUMNS
+            -
+            set(df.columns)
+        )
+
+        if missing_columns:
+            raise ValueError(
+                "Input DataFrame is missing required "
+                "columns: "
+                f"{sorted(missing_columns)}"
+            )
 
     # Standardise address strings
     def normalize_address(self, address):
@@ -138,7 +192,12 @@ class DataCleaner:
     # Clean text columns
     def clean_text_columns(self, df):
 
-        text_columns = df.select_dtypes(include="object").columns
+        text_columns = df.select_dtypes(
+            include=[
+                "object",
+                "string"
+            ]
+        ).columns
 
         df[text_columns] = (
             df[text_columns]
@@ -150,12 +209,86 @@ class DataCleaner:
 
     # Clean numeric columns
     def clean_numeric_columns(self, df):
+        """
+        Convert expected numeric columns while rejecting
+        unexpected non-numeric source values.
+        """
 
         for col in NUMERIC_COLUMNS:
-            df[col] = pd.to_numeric(
-                df[col],
+
+            original = df[col].copy()
+
+            cleaned = pd.to_numeric(
+                original,
                 errors="coerce"
             )
+
+            invalid_mask = (
+                original.notna()
+                & original.astype(str).str.strip().ne("")
+                & cleaned.isna()
+            )
+
+            if invalid_mask.any():
+                bad_values = (
+                    original.loc[
+                        invalid_mask
+                    ]
+                    .astype(str)
+                    .unique()[:10]
+                    .tolist()
+                )
+
+                raise ValueError(
+                    f"{col} contains non-numeric "
+                    f"values: {bad_values}"
+                )
+
+            non_null = cleaned.dropna()
+
+            if (
+                (
+                    non_null % 1
+                )
+                != 0
+            ).any():
+                raise ValueError(
+                    f"{col} contains non-integer values."
+                )
+
+            df[col] = cleaned
+
+        pre_values = (
+            df[
+                "principal_residence_exemption_percentage"
+            ]
+            .dropna()
+        )
+
+        if (
+            (pre_values < 0)
+            | (pre_values > 100)
+        ).any():
+            raise ValueError(
+                "principal_residence_exemption_percentage "
+                "must be between 0 and 100."
+            )
+
+        for col in [
+            "tax_value",
+            "assessed_value",
+            "state_equalized_value"
+        ]:
+            if (
+                df[col]
+                .dropna()
+                .lt(0)
+                .any()
+            ):
+                raise ValueError(
+                    f"{col} cannot contain "
+                    "negative values."
+                )
 
         return df
 
@@ -166,18 +299,51 @@ class DataCleaner:
 
     # Clean parcel numbers and convert them to strings
     def clean_parcel_numbers(self, df):
+        """
+        Normalize parcel numbers without converting
+        missing values into literal strings.
+        """
 
         df["parcel_number"] = (
             df["parcel_number"]
-            .astype(str)
+            .astype("string")
             .str.strip()
         )
+
+        df["parcel_number"] = (
+            df["parcel_number"]
+            .replace(
+                "",
+                pd.NA
+            )
+        )
+
+        if df[
+            "parcel_number"
+        ].isna().any():
+
+            missing_rows = (
+                df.index[
+                    df[
+                        "parcel_number"
+                    ].isna()
+                ]
+                .tolist()[:10]
+            )
+
+            raise ValueError(
+                "Missing parcel numbers found "
+                "at DataFrame rows: "
+                f"{missing_rows}"
+            )
 
         return df
 
     # Perform all data cleaning and standardization
     # Returns a clean, standardized copy of the dataframe
     def clean_data(self, df):
+
+        self.validate_input(df)
 
         df = df.copy()
 

@@ -2,12 +2,18 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from api.database import engine
+from api.database import (
+    engine,
+    get_active_snapshot_id
+)
 from api.routers import (
     admin,
     associations,
     entities
 )
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================
@@ -55,17 +61,6 @@ def health_check():
     MySQL, and has an active data snapshot.
     """
 
-    health_query = text(
-        """
-        SELECT
-            ads.snapshot_id
-
-        FROM active_data_snapshot ads
-
-        WHERE ads.singleton_id = 1
-        """
-    )
-
     try:
         with engine.connect() as connection:
 
@@ -80,10 +75,9 @@ def health_check():
                 )
 
             active_snapshot_id = (
-                connection.execute(
-                    health_query
+                get_active_snapshot_id(
+                    connection
                 )
-                .scalar_one_or_none()
             )
 
             if active_snapshot_id is None:
@@ -101,6 +95,9 @@ def health_check():
         raise
 
     except SQLAlchemyError:
+        logger.exception(
+            "Database connection failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database connection failed."

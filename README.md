@@ -104,6 +104,8 @@ kzoo_county_project/
 │       └── admin.py
 │
 ├── database/
+    ├── create_schema.sql
+    ├── admin_schema.sql
 │   └── load_database.py
 │
 ├── tests/
@@ -274,6 +276,27 @@ Suppressions are snapshot-specific and preserve:
 - Restoration history
 
 Suppressions are preserved as audit history rather than deleting association records.
+
+---
+
+# Initial Database Setup
+
+For a new MySQL installation, initialize the project in this order:
+
+1. Run `create_schema.sql` to create the generated-data tables and
+   `entity_association_neighbors` view.
+2. Run `admin_schema.sql` to create the persistent snapshot and
+   administrative tables.
+3. Create the least-privilege MySQL accounts described below.
+4. Copy `.env.example` to `.env` and configure the required
+   credentials and administrative API key.
+5. Run the ETL pipeline to create and activate the initial data
+   snapshot.
+6. Start the FastAPI application and run the automated tests.
+
+`create_schema.sql` defines data that is replaced by annual ETL
+refreshes. `admin_schema.sql` defines persistent administrative
+history and must not be recreated as part of a normal annual refresh.
 
 ---
 
@@ -452,7 +475,14 @@ The expected value comes from:
 TREASURY_ADMIN_API_KEY
 ```
 
-The current API-key mechanism is intended to protect the development/admin interface. A final County deployment may replace or integrate it with County authentication infrastructure.
+The current shared API-key mechanism is intended for development
+or a tightly controlled internal deployment. The admin key must
+never be embedded in browser-side code.
+
+A full production deployment should integrate with County
+authentication infrastructure so administrative actions can be
+attributed to authenticated staff rather than solely to a shared key
+and caller-supplied `created_by` / `revoked_by` values.
 
 ---
 
@@ -705,7 +735,8 @@ Run the entire automated test suite with:
 python -m pytest -v
 ```
 
-The current suite contains **50 passing tests**.
+The current suite contains **67 passing tests** when run
+against the validated 2025 development snapshot.
 
 Tests are organized by purpose:
 
@@ -718,6 +749,7 @@ tests/
 │   └── Read API contract behavior
 │
 ├── etl/
+│   ├── Data-cleaning validation tests
 │   ├── ETL configuration tests
 │   ├── Snapshot registration tests
 │   └── Annual-refresh CLI tests
@@ -728,7 +760,26 @@ tests/
 
 The ETL unit tests do not modify the live Treasury database.
 
-The project also includes a manually verified transaction rollback test in which a duplicate snapshot code caused a late-stage ETL failure after generated data had been reloaded. The transaction rolled back successfully, leaving the original active 2025 snapshot and row counts intact.
+The read-API, administrative-API, and validated-snapshot tests
+are integration tests and require access to a configured Treasury
+MySQL database.
+
+Administrative API tests execute real suppression/restoration SQL
+inside rollback-only test transactions so that test records are not
+persisted.
+
+The `snapshot_2025` regression suite applies only to the exact
+validated 2025 baseline snapshot and is skipped when another snapshot
+is active.
+
+Transactional rollback behavior has also been manually verified.
+Generated-table replacement, database validation, snapshot
+registration, and snapshot activation occur within one transaction,
+so a failure before commit does not leave a partially refreshed
+active dataset.
+
+Duplicate snapshot codes are now rejected during preflight before
+generated tables are cleared.
 
 ---
 

@@ -59,5 +59,6 @@ admin_database_url = URL.create(
 
 admin_engine = create_engine(
     admin_database_url,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    hide_parameters=True
 )

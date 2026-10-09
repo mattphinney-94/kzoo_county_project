@@ -2,8 +2,14 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from api.database import engine
+from api.database import (
+    engine,
+    get_active_snapshot_id
+)
 from api.schemas import AssociationEvidenceResponse
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================
@@ -68,20 +74,19 @@ def get_association_evidence(
 
         WHERE a.association_id = :association_id
 
-          AND NOT EXISTS (SELECT 1
+                    AND NOT EXISTS (
+              SELECT 1
 
-                          FROM association_suppressions suppression
+              FROM association_suppressions suppression
 
-                                   JOIN active_data_snapshot active_snapshot
-                                        ON active_snapshot.snapshot_id
-                                            = suppression.snapshot_id
+              WHERE suppression.snapshot_id
+                    = :active_snapshot_id
 
-                          WHERE active_snapshot.singleton_id = 1
+                AND suppression.association_id
+                    = a.association_id
 
-                            AND suppression.association_id
-                              = a.association_id
-
-                            AND suppression.revoked_at IS NULL)
+                AND suppression.revoked_at IS NULL
+          )
         """
     )
 
@@ -122,12 +127,30 @@ def get_association_evidence(
     try:
         with engine.connect() as connection:
 
+            active_snapshot_id = (
+                get_active_snapshot_id(
+                    connection
+                )
+            )
+
+            if active_snapshot_id is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No active data snapshot "
+                        "is configured."
+                    )
+                )
+
             association = (
                 connection.execute(
                     association_query,
                     {
                         "association_id":
-                            association_id
+                            association_id,
+
+                        "active_snapshot_id":
+                            active_snapshot_id
                     }
                 )
                 .mappings()
@@ -163,7 +186,9 @@ def get_association_evidence(
         raise
 
     except SQLAlchemyError:
-
+        logger.exception(
+            "Database query failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database query failed."

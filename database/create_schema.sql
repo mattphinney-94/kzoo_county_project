@@ -1,9 +1,11 @@
 -- ==========================================================
 -- KALAMAZOO COUNTY PARCEL / ENTITY ASSOCIATION DATABASE
--- V1 RELATIONAL SCHEMA
+-- GENERATED-DATA RELATIONAL SCHEMA
 -- ==========================================================
 
-CREATE DATABASE IF NOT EXISTS kalamazoo_county_treasury;
+CREATE DATABASE IF NOT EXISTS kalamazoo_county_treasury
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_0900_ai_ci;
 
 USE kalamazoo_county_treasury;
 
@@ -42,7 +44,10 @@ CREATE TABLE parcels (
         OR
         principal_residence_exemption_percentage BETWEEN 0 AND 100
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- 2. ENTITIES
@@ -98,7 +103,10 @@ CREATE TABLE entities (
     CHECK (
         occurrence_count >= 1
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- 3. PARCEL ENTITY ROLES
@@ -153,7 +161,10 @@ CREATE TABLE parcel_entity_roles (
             'Tax Send To'
         )
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- 4. ENTITY ASSOCIATIONS
@@ -228,7 +239,10 @@ CREATE TABLE entity_associations (
     CHECK (
         evidence_rule_count <= evidence_count
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- 5. ASSOCIATION EVIDENCE
@@ -343,7 +357,10 @@ CREATE TABLE association_evidence (
             'Taxpayer'
         )
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- 6. ENTITY OCCURRENCES
@@ -455,7 +472,10 @@ CREATE TABLE entity_occurrences (
             'Low'
         )
     )
-);
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================
 -- ENTITY ASSOCIATION NEIGHBORS

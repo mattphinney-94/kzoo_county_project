@@ -1,7 +1,9 @@
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================
@@ -73,5 +75,28 @@ database_url = URL.create(
 
 engine = create_engine(
     database_url,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    hide_parameters=True
 )
+
+ACTIVE_SNAPSHOT_QUERY = text(
+    """
+    SELECT snapshot_id
+    FROM active_data_snapshot
+    WHERE singleton_id = 1
+    """
+)
+
+
+def get_active_snapshot_id(connection):
+    """
+    Return the currently active data snapshot ID,
+    or None if no active snapshot is configured.
+    """
+
+    return (
+        connection.execute(
+            ACTIVE_SNAPSHOT_QUERY
+        )
+        .scalar_one_or_none()
+    )

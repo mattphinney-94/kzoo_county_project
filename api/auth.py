@@ -28,12 +28,15 @@ def require_admin_api_key(
         )
 ):
     """
-    Require a valid administrative API key.
+    Require the shared administrative API key.
 
-    This provides development-time protection for
-    administrative endpoints. Production authentication
-    may later be replaced by the County's authentication
-    infrastructure.
+    This mechanism is intended for development or a tightly
+    controlled internal deployment. The admin key must not be
+    embedded in browser-side code.
+
+    Production deployment should use the County's authentication
+    infrastructure so administrative actions can be attributed
+    to an authenticated user.
     """
 
     if (

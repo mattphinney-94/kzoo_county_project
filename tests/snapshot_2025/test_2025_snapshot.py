@@ -1,5 +1,50 @@
 from collections import Counter
 
+import pytest
+from sqlalchemy import text
+
+from api.database import engine as read_engine
+
+@pytest.fixture(
+    scope="module",
+    autouse=True
+)
+def require_validated_2025_snapshot():
+    """
+    Run this regression module only when the active database
+    contains the exact validated 2025 baseline snapshot.
+    """
+
+    query = text(
+        """
+        SELECT
+            ds.snapshot_code
+
+        FROM active_data_snapshot ads
+
+        JOIN data_snapshots ds
+            ON ds.snapshot_id
+                = ads.snapshot_id
+
+        WHERE ads.singleton_id = 1
+        """
+    )
+
+    with read_engine.connect() as connection:
+
+        snapshot_code = (
+            connection.execute(
+                query
+            )
+            .scalar_one_or_none()
+        )
+
+    if snapshot_code != "2025":
+        pytest.skip(
+            "2025 snapshot regression tests require "
+            "the validated active snapshot code '2025'."
+        )
+
 def test_entity_search_returns_results(client):
 
     response = client.get(

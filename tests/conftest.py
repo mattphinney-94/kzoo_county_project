@@ -11,14 +11,13 @@ import pytest
 load_dotenv()
 
 
-from api.main import app
-
-
 @pytest.fixture
 def client():
     """
     Provide a FastAPI test client for integration tests.
     """
+
+    from api.main import app
 
     with TestClient(app) as test_client:
         yield test_client

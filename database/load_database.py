@@ -2,8 +2,8 @@
 Load the completed Kalamazoo County Treasury entity-resolution
 pipeline outputs into the MySQL production schema.
 
-This module assumes that create_schema.sql has already been run
-and that the following MySQL objects exist:
+This module assumes that the database schema has already been
+created and that the following MySQL objects exist:
 
     parcels
     entities
@@ -11,6 +11,11 @@ and that the following MySQL objects exist:
     entity_associations
     association_evidence
     entity_occurrences
+
+    data_snapshots
+    active_data_snapshot
+    association_suppressions
+
     entity_association_neighbors   (view)
 """
 
@@ -486,6 +491,39 @@ def _validate_pipeline_outputs(
         "Pipeline validation passed."
     )
 
+def validate_pipeline_for_load(
+        clean_df,
+        entities,
+        parcel_entity_roles,
+        association_evidence,
+        entity_associations,
+        entity_occurrences
+):
+    """
+    Build the parcels output and validate the completed
+    pipeline without connecting to or modifying MySQL.
+
+    Returns the validated parcels DataFrame.
+    """
+
+    print("Creating parcels DataFrame...")
+
+    parcels = _create_parcels_dataframe(
+        clean_df
+    )
+
+    print("Parcels DataFrame created.")
+
+    _validate_pipeline_outputs(
+        parcels,
+        entities,
+        parcel_entity_roles,
+        association_evidence,
+        entity_associations,
+        entity_occurrences
+    )
+
+    return parcels
 
 # ==========================================================
 # DATABASE SCHEMA VALIDATION
@@ -515,7 +553,9 @@ def _validate_database_schema(
 
     table_query = text(
         """
-        SELECT table_name
+        SELECT
+            table_name,
+            engine
         FROM information_schema.tables
         WHERE table_schema = :database_name
           AND table_type = 'BASE TABLE'
@@ -529,10 +569,14 @@ def _validate_database_schema(
         }
     )
 
-    existing_tables = {
-        row[0]
+    table_engines = {
+        row[0]: row[1]
         for row in result
     }
+
+    existing_tables = set(
+        table_engines
+    )
 
     missing_tables = (
         required_tables
@@ -544,6 +588,22 @@ def _validate_database_schema(
         raise RuntimeError(
             "Database schema is missing tables: "
             f"{sorted(missing_tables)}"
+        )
+
+    non_innodb_tables = sorted(
+        table_name
+        for table_name in required_tables
+        if table_engines[
+            table_name
+        ].upper() != "INNODB"
+    )
+
+    if non_innodb_tables:
+        raise RuntimeError(
+            "The following required tables are not "
+            "using InnoDB: "
+            f"{non_innodb_tables}. "
+            "Transactional ETL rollback requires InnoDB."
         )
 
     view_query = text(
@@ -739,9 +799,7 @@ def _validate_loaded_database(
 # SNAPSHOT REGISTRATION
 # ==========================================================
 
-def _register_and_activate_snapshot(
-        connection,
-        *,
+def _normalize_snapshot_metadata(
         snapshot_code,
         tax_year,
         source_filename,
@@ -749,33 +807,37 @@ def _register_and_activate_snapshot(
         notes=None
 ):
     """
-    Record a successfully loaded data snapshot and mark it as
-    the snapshot currently represented by the generated tables.
-
-    This function must be called inside the same transaction as
-    the generated-table refresh.
+    Validate and normalize metadata for a data snapshot.
     """
 
+    if not isinstance(snapshot_code, str):
+        raise ValueError(
+            "snapshot_code must be a string."
+        )
+
     snapshot_code = snapshot_code.strip()
-    source_filename = source_filename.strip()
-
-    if loaded_by is not None:
-        loaded_by = loaded_by.strip() or None
-
-    if notes is not None:
-        notes = notes.strip() or None
 
     if not snapshot_code:
         raise ValueError(
             "snapshot_code cannot be blank."
         )
 
+    if not isinstance(source_filename, str):
+        raise ValueError(
+            "source_filename must be a string."
+        )
+
+    source_filename = source_filename.strip()
+
     if not source_filename:
         raise ValueError(
             "source_filename cannot be blank."
         )
 
-    if not isinstance(tax_year, int):
+    if (
+        isinstance(tax_year, bool)
+        or not isinstance(tax_year, int)
+    ):
         raise ValueError(
             "tax_year must be an integer."
         )
@@ -785,14 +847,48 @@ def _register_and_activate_snapshot(
             "tax_year must be between 2000 and 2200."
         )
 
-    # Snapshot codes identify one particular successful load.
-    # Reusing one would make the historical record ambiguous.
+    if loaded_by is not None:
+        if not isinstance(loaded_by, str):
+            raise ValueError(
+                "loaded_by must be a string or None."
+            )
+
+        loaded_by = (
+            loaded_by.strip()
+            or None
+        )
+
+    if notes is not None:
+        if not isinstance(notes, str):
+            raise ValueError(
+                "notes must be a string or None."
+            )
+
+        notes = (
+            notes.strip()
+            or None
+        )
+
+    return (
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by,
+        notes
+    )
+
+def _ensure_snapshot_code_available(
+        connection,
+        snapshot_code
+):
+    """
+    Confirm that a snapshot code has not already been used.
+    """
+
     existing_snapshot_query = text(
         """
         SELECT snapshot_id
-
         FROM data_snapshots
-
         WHERE snapshot_code = :snapshot_code
         """
     )
@@ -813,6 +909,42 @@ def _register_and_activate_snapshot(
             "Snapshot code already exists: "
             f"{snapshot_code}"
         )
+
+def _register_and_activate_snapshot(
+        connection,
+        *,
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by=None,
+        notes=None
+):
+    """
+    Record a successfully loaded data snapshot and mark it as
+    the snapshot currently represented by the generated tables.
+
+    This function must be called inside the same transaction as
+    the generated-table refresh.
+    """
+
+    (
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by,
+        notes
+    ) = _normalize_snapshot_metadata(
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by,
+        notes
+    )
+
+    _ensure_snapshot_code_available(
+        connection,
+        snapshot_code
+    )
 
     insert_snapshot_query = text(
         """
@@ -914,40 +1046,34 @@ def load_database(
     If anything fails, the transaction is rolled back.
     """
 
-    print("Entered load_database().")
+    (
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by,
+        snapshot_notes
+    ) = _normalize_snapshot_metadata(
+        snapshot_code,
+        tax_year,
+        source_filename,
+        loaded_by,
+        snapshot_notes
+    )
+
+    parcels = validate_pipeline_for_load(
+        clean_df,
+        entities,
+        parcel_entity_roles,
+        association_evidence,
+        entity_associations,
+        entity_occurrences
+    )
 
     database_config = (
         _get_database_config(
             db_user=db_user,
             db_password=db_password
         )
-    )
-
-    print("Creating parcels DataFrame...")
-
-    # ------------------------------------------------------
-    # Create parcel table output
-    # ------------------------------------------------------
-
-    parcels = (
-        _create_parcels_dataframe(
-            clean_df
-        )
-    )
-
-    print("Parcels DataFrame created.")
-
-    # ------------------------------------------------------
-    # Validate original pipeline outputs
-    # ------------------------------------------------------
-
-    _validate_pipeline_outputs(
-        parcels,
-        entities,
-        parcel_entity_roles,
-        association_evidence,
-        entity_associations,
-        entity_occurrences
     )
 
     print("Preparing DataFrames for SQL...")
@@ -1093,6 +1219,11 @@ def load_database(
             _validate_database_schema(
                 connection,
                 database_config["name"]
+            )
+
+            _ensure_snapshot_code_available(
+                connection,
+                snapshot_code
             )
 
             _clear_database(

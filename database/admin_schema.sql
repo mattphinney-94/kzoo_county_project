@@ -1,5 +1,14 @@
-USE kalamazoo_county_treasury;
+-- ==========================================================
+-- KALAMAZOO COUNTY TREASURY
+-- SNAPSHOT / ADMINISTRATIVE SCHEMA
+--
+-- Prerequisite:
+--     Run create_schema.sql first.
+--
+-- These tables persist across annual generated-data refreshes.
+-- ==========================================================
 
+USE kalamazoo_county_treasury;
 
 -- ==========================================================
 -- DATA SNAPSHOTS

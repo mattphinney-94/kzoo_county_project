@@ -1,5 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
+import logging
+logger = logging.getLogger(__name__)
 
 # ==========================================================
 # ENTITY SEARCH SCHEMAS
@@ -60,12 +62,12 @@ class EntityParcelResult(BaseModel):
     property_address: str | None = None
     roles: list[str]
 
-    principal_residence_exemption_percentage: int
+    principal_residence_exemption_percentage: int | None = None
     property_class: str | None = None
 
-    tax_value: int
-    assessed_value: int
-    state_equalized_value: int
+    tax_value: int | None = None
+    assessed_value: int | None = None
+    state_equalized_value: int | None = None
 
 
 class EntityParcelsResponse(BaseModel):

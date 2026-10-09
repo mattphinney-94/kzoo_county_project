@@ -1,16 +1,18 @@
 """
-Creates the tables used for entity resolution.
+Resolve cleaned Kalamazoo County Treasury parcel data into
+entity-resolution and association tables.
 
-Current capabilities
---------------------
-- entity_occurrences
+EntityResolver.build() produces:
 
-Future capabilities
--------------------
-- entities
-- parcel_entity_roles
-- association_evidence
-- entity_associations
+    entity_occurrences
+    entities
+    parcel_entity_roles
+    association_evidence
+    entity_associations
+
+The resolver is intentionally conservative. Association evidence
+and confidence describe observed relationships in the source data;
+they do not establish legal ownership or control.
 """
 
 import re
@@ -1796,8 +1798,9 @@ class EntityResolver:
             #
             # could instead mean surname + first initial.
             #
-            # Therefore retain this as a candidate but do not expand
-            # it automatically under the default High-only setting.
+            # Therefore retain this as a Medium-confidence candidate.
+            # Whether it expands is controlled by allowed_confidences
+            # in _expand_joint_occurrences().
             # ------------------------------------------------------
 
             elif (
@@ -2160,8 +2163,10 @@ class EntityResolver:
             Default:
                 ("High",)
 
-            Medium-confidence parses remain as Joint rows so they can
-            be audited before being enabled.
+            The main Stage 1 orchestration currently enables both
+            High- and Medium-confidence parses. Any confidence level
+            not included here remains as a Joint row with its parse
+            metadata preserved for audit.
 
         Returns
         -------

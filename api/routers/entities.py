@@ -2,13 +2,19 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from api.database import engine
+from api.database import (
+    engine,
+    get_active_snapshot_id
+)
 from api.schemas import (
     EntityAssociationsResponse,
     EntityDetailResponse,
     EntityParcelsResponse,
     EntitySearchResponse
 )
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================
@@ -62,12 +68,28 @@ def search_entities(
 
     normalized_term = search_term.lower()
 
+    escaped_term = (
+        normalized_term
+        .replace(
+            "!",
+            "!!"
+        )
+        .replace(
+            "%",
+            "!%"
+        )
+        .replace(
+            "_",
+            "!_"
+        )
+    )
+
     contains_pattern = (
-        f"%{normalized_term}%"
+        f"%{escaped_term}%"
     )
 
     prefix_pattern = (
-        f"{normalized_term}%"
+        f"{escaped_term}%"
     )
 
     search_query = text(
@@ -84,7 +106,7 @@ def search_entities(
         FROM entities e
 
         WHERE
-            LOWER(e.canonical_name) LIKE :contains_pattern
+            LOWER(e.canonical_name) LIKE :contains_pattern ESCAPE '!'
 
             OR EXISTS (
                 SELECT 1
@@ -92,7 +114,7 @@ def search_entities(
                 WHERE
                     eo.entity_id = e.entity_id
                     AND LOWER(eo.source_entity_name)
-                        LIKE :contains_pattern
+                        LIKE :contains_pattern ESCAPE '!'
             )
 
         ORDER BY
@@ -105,7 +127,7 @@ def search_entities(
 
                 -- Canonical name begins with search term
                 WHEN LOWER(e.canonical_name)
-                    LIKE :prefix_pattern
+                    LIKE :prefix_pattern ESCAPE '!'
                 THEN 1
 
                 -- Exact original source-name match
@@ -126,7 +148,7 @@ def search_entities(
                     WHERE
                         eo.entity_id = e.entity_id
                         AND LOWER(eo.source_entity_name)
-                            LIKE :prefix_pattern
+                            LIKE :prefix_pattern ESCAPE '!'
                 )
                 THEN 3
 
@@ -167,7 +189,9 @@ def search_entities(
             )
 
     except SQLAlchemyError:
-
+        logger.exception(
+            "Database query failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database query failed."
@@ -232,7 +256,9 @@ def get_entity(
             )
 
     except SQLAlchemyError:
-
+        logger.exception(
+            "Database query failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database query failed."
@@ -330,7 +356,9 @@ def get_entity_parcels(
         raise
 
     except SQLAlchemyError:
-
+        logger.exception(
+            "Database query failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database query failed."
@@ -458,20 +486,19 @@ def get_entity_associations(
 
         WHERE n.entity_id = :entity_id
 
-          AND NOT EXISTS (SELECT 1
+                    AND NOT EXISTS (
+              SELECT 1
 
-                          FROM association_suppressions suppression
+              FROM association_suppressions suppression
 
-                                   JOIN active_data_snapshot active_snapshot
-                                        ON active_snapshot.snapshot_id
-                                            = suppression.snapshot_id
+              WHERE suppression.snapshot_id
+                    = :active_snapshot_id
 
-                          WHERE active_snapshot.singleton_id = 1
+                AND suppression.association_id
+                    = n.association_id
 
-                            AND suppression.association_id
-                              = n.association_id
-
-                            AND suppression.revoked_at IS NULL)
+                AND suppression.revoked_at IS NULL
+          )
 
         ORDER BY CASE n.association_confidence
                      WHEN 'High' THEN 1
@@ -488,6 +515,21 @@ def get_entity_associations(
 
     try:
         with engine.connect() as connection:
+
+            active_snapshot_id = (
+                get_active_snapshot_id(
+                    connection
+                )
+            )
+
+            if active_snapshot_id is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No active data snapshot "
+                        "is configured."
+                    )
+                )
 
             entity_exists = (
                 connection.execute(
@@ -512,7 +554,10 @@ def get_entity_associations(
                     associations_query,
                     {
                         "entity_id":
-                            entity_id
+                            entity_id,
+
+                        "active_snapshot_id":
+                            active_snapshot_id
                     }
                 )
                 .mappings()
@@ -523,7 +568,9 @@ def get_entity_associations(
         raise
 
     except SQLAlchemyError:
-
+        logger.exception(
+            "Database query failed."
+        )
         raise HTTPException(
             status_code=503,
             detail="Database query failed."

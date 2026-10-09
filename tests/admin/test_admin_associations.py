@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -172,6 +173,46 @@ def get_test_association_id():
 
     return association_id
 
+def get_active_snapshot():
+    """
+    Retrieve metadata for the currently active data snapshot.
+    """
+
+    query = text(
+        """
+        SELECT
+            ds.snapshot_id,
+            ds.snapshot_code,
+            ds.tax_year
+
+        FROM active_data_snapshot ads
+
+        JOIN data_snapshots ds
+            ON ds.snapshot_id
+                = ads.snapshot_id
+
+        WHERE ads.singleton_id = 1
+        """
+    )
+
+    with read_engine.connect() as connection:
+
+        snapshot = (
+            connection.execute(
+                query
+            )
+            .mappings()
+            .first()
+        )
+
+    if snapshot is None:
+        pytest.fail(
+            "No active data snapshot is available "
+            "for administrative API testing."
+        )
+
+    return dict(snapshot)
+
 
 # ==========================================================
 # AUTHENTICATION
@@ -231,6 +272,109 @@ def test_suppression_rejects_invalid_admin_key(
 
     assert response.status_code == 401
 
+@pytest.mark.parametrize(
+    (
+        "method",
+        "path",
+        "request_body"
+    ),
+    [
+        (
+            "post",
+            "/api/admin/associations/1/suppress",
+            {
+                "reason":
+                    "Administrative API test.",
+
+                "created_by":
+                    "pytest"
+            }
+        ),
+        (
+            "post",
+            "/api/admin/associations/1/restore",
+            {
+                "revoked_by":
+                    "pytest",
+
+                "revocation_reason":
+                    "Administrative API test."
+            }
+        ),
+        (
+            "get",
+            "/api/admin/association-suppressions",
+            None
+        )
+    ]
+)
+def test_admin_endpoints_require_active_snapshot(
+        client,
+        admin_headers,
+        monkeypatch,
+        method,
+        path,
+        request_body
+):
+    """
+    Administrative association operations must fail closed
+    when no active data snapshot is configured.
+    """
+
+    result = MagicMock()
+
+    result.scalar_one_or_none.return_value = None
+
+    result.mappings.return_value.first.return_value = (
+        None
+    )
+
+    mock_connection = MagicMock()
+
+    mock_connection.execute.return_value = (
+        result
+    )
+
+    mock_engine = MagicMock()
+
+    mock_engine.begin.return_value.__enter__.return_value = (
+        mock_connection
+    )
+
+    mock_engine.connect.return_value.__enter__.return_value = (
+        mock_connection
+    )
+
+    monkeypatch.setattr(
+        admin_router,
+        "admin_engine",
+        mock_engine
+    )
+
+    request_kwargs = {
+        "headers":
+            admin_headers
+    }
+
+    if request_body is not None:
+        request_kwargs[
+            "json"
+        ] = request_body
+
+    response = getattr(
+        client,
+        method
+    )(
+        path,
+        **request_kwargs
+    )
+
+    assert response.status_code == 503
+
+    assert response.json() == {
+        "detail":
+            "No active data snapshot is configured."
+    }
 
 # ==========================================================
 # INPUT VALIDATION
@@ -356,6 +500,7 @@ def test_association_can_be_suppressed(
 ):
 
     association_id = get_test_association_id()
+    active_snapshot = get_active_snapshot()
 
     response = client.post(
         (
@@ -383,7 +528,11 @@ def test_association_can_be_suppressed(
         association_id
     )
 
-    assert data["snapshot_id"] == 1
+    assert (
+            data["snapshot_id"]
+            ==
+            active_snapshot["snapshot_id"]
+    )
 
     assert data["suppression_id"] > 0
 
@@ -723,6 +872,7 @@ def test_active_suppression_appears_in_admin_list(
 ):
 
     association_id = get_test_association_id()
+    active_snapshot = get_active_snapshot()
 
     test_reason = (
         "Temporary suppression for admin list test."
@@ -768,9 +918,23 @@ def test_active_suppression_appears_in_admin_list(
 
         data = list_response.json()
 
-        assert data["snapshot_id"] == 1
-        assert data["snapshot_code"] == "2025"
-        assert data["tax_year"] == 2025
+        assert (
+                data["snapshot_id"]
+                ==
+                active_snapshot["snapshot_id"]
+        )
+
+        assert (
+                data["snapshot_code"]
+                ==
+                active_snapshot["snapshot_code"]
+        )
+
+        assert (
+                data["tax_year"]
+                ==
+                active_snapshot["tax_year"]
+        )
 
         assert (
             data["include_restored"]
@@ -918,3 +1082,4 @@ def test_restored_suppression_only_appears_when_requested(
             ==
             "Restore for admin history test."
         )
+

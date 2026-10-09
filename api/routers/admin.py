@@ -20,6 +20,9 @@ from api.schemas import (
     AssociationSuppressionListResponse
 )
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 # ==========================================================
 # ROUTER
@@ -258,20 +261,48 @@ def suppress_association(
     except HTTPException:
         raise
 
+
     except IntegrityError:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Association suppression could "
-                "not be created because an active "
-                "suppression already exists."
-            )
+
+        logger.exception(
+
+            "Integrity error while suppressing association."
+
         )
 
-    except SQLAlchemyError:
         raise HTTPException(
+
+            status_code=409,
+
+            detail=(
+
+                "Association suppression could "
+
+                "not be created because an active "
+
+                "suppression already exists."
+
+            )
+
+        )
+
+
+    except SQLAlchemyError:
+
+        logger.exception(
+
+            "Database operation failed while "
+
+            "suppressing association."
+
+        )
+
+        raise HTTPException(
+
             status_code=503,
+
             detail="Database operation failed."
+
         )
 
     return {
@@ -535,9 +566,21 @@ def restore_association(
         raise
 
     except SQLAlchemyError:
+
+        logger.exception(
+
+            "Database operation failed while "
+
+            "restoring association."
+
+        )
+
         raise HTTPException(
+
             status_code=503,
+
             detail="Database operation failed."
+
         )
 
     return dict(
@@ -674,9 +717,21 @@ def list_association_suppressions(
         raise
 
     except SQLAlchemyError:
+
+        logger.exception(
+
+            "Database operation failed while listing "
+
+            "association suppressions."
+
+        )
+
         raise HTTPException(
+
             status_code=503,
+
             detail="Database operation failed."
+
         )
 
     suppression_records = [
