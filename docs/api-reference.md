@@ -43,6 +43,10 @@ The `q` parameter is required and accepts a name or partial name. The optional `
 
 Searches include canonical entity names and source-name variants recorded in `entity_occurrences`. Results contain one row per resolved entity, including identifying fields and `occurrence_count`.
 
+**Flexible name search:** The API first runs its existing literal substring search. For searches containing multiple words—or single-word searches with no substring matches—it also checks order-independent name matches, a short curated nickname list (such as Will/Bill → William), and small spelling errors in name tokens. Existing literal substring matches rank first. Similar-looking names are **candidate search results**, not automatically merged people or organizations. All existing entity IDs, addresses, and evidence remain unchanged.
+
+Examples for the validated 2025 data include `William Graham`, `William D Graham`, `Graham William D`, `Will Graham`, and `Will Grahm`. For ambiguous names, compare addresses, roles, and source evidence before drawing conclusions. Approximate search does not imply an association confidence category.
+
 ### Get Entity Details
 
 ```http

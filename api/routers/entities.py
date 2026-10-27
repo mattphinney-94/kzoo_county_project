@@ -6,6 +6,7 @@ from api.database import (
     engine,
     get_active_snapshot_id
 )
+from api.search_matching import rank_fuzzy_candidates, tokenize
 from api.schemas import (
     EntityAssociationsResponse,
     EntityDetailResponse,
@@ -90,6 +91,28 @@ def search_entities(
 
     prefix_pattern = (
         f"{escaped_term}%"
+    )
+
+    # An exact/substring SQL match remains the fast path. Multiword queries
+    # also check approximate candidates so name order and nicknames work.
+    # For single-word queries, do so only when SQL found no matches.
+    words = tokenize(search_term)
+    should_consider_fuzzy = 1 <= len(words) <= 6
+
+    fuzzy_candidates_query = text(
+        """
+        SELECT
+            e.entity_id,
+            e.canonical_name,
+            e.entity_type,
+            e.canonical_address,
+            e.organization_type,
+            e.organization_classification_confidence,
+            e.occurrence_count,
+            eo.source_entity_name
+        FROM entities e
+        LEFT JOIN entity_occurrences eo ON eo.entity_id = e.entity_id
+        """
     )
 
     search_query = text(
@@ -188,6 +211,16 @@ def search_entities(
                 .all()
             )
 
+            # Only perform the broader search when it can add candidates.
+            fuzzy_rows = []
+            if (should_consider_fuzzy and len(rows) < limit
+                    and (len(words) > 1 or not rows)):
+                fuzzy_rows = (
+                    connection.execute(fuzzy_candidates_query)
+                    .mappings()
+                    .all()
+                )
+
     except SQLAlchemyError:
         logger.exception(
             "Database query failed."
@@ -197,10 +230,15 @@ def search_entities(
             detail="Database query failed."
         )
 
-    results = [
-        dict(row)
-        for row in rows
-    ]
+    results = [dict(row) for row in rows]
+    if fuzzy_rows:
+        extras = rank_fuzzy_candidates(
+            search_term,
+            fuzzy_rows,
+            exclude_ids={row["entity_id"] for row in results},
+            limit=limit - len(results)
+        )
+        results.extend(extras)
 
     return {
         "query": search_term,
