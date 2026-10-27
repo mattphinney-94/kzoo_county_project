@@ -515,3 +515,20 @@ def test_evidence_ids_are_unique(client):
         ==
         len(set(evidence_ids))
     )
+
+@pytest.mark.parametrize("query", [
+    "William Graham",
+    "William D Graham",
+    "Graham William D",
+    "Will Graham",
+    "Will Grahm",
+    "Bill Graham",
+])
+def test_search_finds_william_graham_in_any_order_with_typo_or_nickname(
+    client, query
+):
+    """Search discovers but never merges distinct 2025 entity IDs."""
+    response = client.get("/api/entities/search", params={"q": query})
+    assert response.status_code == 200
+    found_ids = {item["entity_id"] for item in response.json()["results"]}
+    assert {1710, 1711, 1719}.issubset(found_ids)
